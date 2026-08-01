@@ -109,6 +109,21 @@ could fill up to 99 bp away from the book and overspend the risk-approved
 cycle size (audit 2026-07-31, F1). This is an execution-safety bound, not a
 profit gate.
 
+**One deliberate exception.** `engine/adapter/nado.py` converts a reduce-only
+order to MARKET when its notional is under the venue minimum: a resting limit
+that small can never fill, so crossing is the only way out. A sub-minimum sell
+remainder therefore exits as a 1%-bounded IOC rather than a 15 bp limit. That
+is the right trade — stranding the position is strictly worse than a bounded
+dust exit — but it means "every leg is 15 bp bounded" is true for full-size
+legs only.
+
+**A marketable limit is not an IOC.** If the book cannot fill it inside the
+bound, the remainder RESTS. Taker mode disables the maker requote/cross
+rescues, so a taker leg still live after `vol_taker_fill_timeout_seconds`
+(10 s) is cancelled and re-placed — a partially filled buy flips straight to
+selling what it actually got. Without that, a thin book stalls the run
+holding a partial position (found in self-review, TAKER-REST-STALL).
+
 ## Fee model
 
 ### Volume accounting — both legs count
@@ -142,29 +157,25 @@ Rates resolve live-first, with a measured fallback:
 
 The estimate quotes `venue + builder` per leg.
 
-> **Open question — is the builder share already inside the venue fee?**
-> `engine_persistence.py` states as established fact that the venue match
-> `fee` **already includes** the builder portion and splits it out for
-> attribution (`fill_fee = venue_fee − builder_fee`). This contradicts the
-> first draft of this doc, which inferred "charged on top" from
-> `trades_mainnet.builder_fee` measuring exactly 1.000 bp — but that column is
-> *computed* as `notional × 0.0001`, so it reads 1.000 bp tautologically and
-> is **not evidence either way** (audit 2026-07-31). Exactly one of the two
-> readings is right; settle it against a single production fill by comparing
-> the venue's reported `fee` against `notional × venue_rate`.
+> **Settled (2026-07-31).** The venue's *charged* fee — what `order.fee_quote`
+> reports and what the controller's PnL uses — is **all-in, including the
+> builder share**. `engine_persistence` states this outright and splits the
+> builder back out purely for attribution
+> (`fill_fee = venue_fee − notional × 1bp`), which is why
+> `fill_fee + builder_fee` reconstructs the charged total. The *catalog* rate,
+> by contrast, is the venue **base** rate: KBTC quotes 3.50 bp and the measured
+> charged all-in is 4.30–4.44 bp, i.e. base + 1 bp builder.
 >
-> Until it is settled the estimate adds them, which **over**-quotes by 1 bp if
-> the venue fee is already all-in. For a card whose button means "I agree to
-> these charges", over-quoting is the only acceptable direction to be wrong.
-> The same addition appears in the controller's breakeven, where it makes the
-> sell gate ~2 bp harder and therefore holds ~marginally longer — noted as a
-> real (if small) cost of the ambiguity.
-
-### Slippage disclaimer (required)
-
-Spot market orders walk the book. The card states plainly that slippage can
-push the **total cost above the displayed estimate**, because the estimate
-prices fees only — not the price you actually fill at.
+> So both sides are correct as written: the card adds `catalog_base + builder`
+> to reach the charged all-in, and the controller's loss stop uses the charged
+> fee directly. The earlier "builder_fee measures exactly 1.000 bp" argument
+> was **tautological** — that column is computed as `notional × 0.0001` — and
+> is not evidence of anything.
+>
+> One consequence was a real bug: `DEFAULT_SPOT_TAKER_FEE_RATE` had been set to
+> the *all-in* 4.3 bp while callers add the builder on top, double-counting it
+> and over-quoting the card by ~20%. It is now the base rate (3.3 bp), so the
+> fallback path reaches the same 4.3 bp all-in as the measurement.
 
 ## Workflow
 

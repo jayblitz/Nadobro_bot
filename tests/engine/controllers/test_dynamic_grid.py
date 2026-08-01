@@ -128,6 +128,8 @@ def test_metrics_exposed_for_dashboard():
         assert m["dgrid_variance_ratio"] >= 1.25
         assert m["dgrid_reset_threshold_bp"] == 25.0  # honored, not inflated to 50
 
+    asyncio.run(body())
+
 
 def test_recenter_on_by_default_reuses_executor_no_respawn():
     # A *dynamic* grid must FOLLOW price by default — the "placed a few orders

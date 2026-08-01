@@ -1,9 +1,9 @@
 """Volume Bot v4.1 — taker mode (docs/volume_bot_taker_v4.md).
 
-Both legs are taker orders (marketable limits, price-bounded), and
-sell is PATIENT: it waits for a price strictly above the entry that also
-clears both legs' fees ("buy lower, sell higher than it bought"), with a
-bounded-loss concession after a stall so the run can never hang forever.
+Both legs are taker orders (marketable limits, price-bounded) fired back to
+back with NO profit gate — PnL is not the objective, volume is. The bot is
+FLAT between cycles, and the session loss limit (5% of margin, net of fees)
+is what bounds a run.
 
 The v3 maker path is pinned by tests/engine/controllers/test_volume_bot.py.
 """
@@ -23,8 +23,12 @@ PAIR = "KBTC"
 
 
 def _vb(adapter, orch, **cfg):
+    # This suite exercises the TAKER path specifically. v4.2 ships maker TWAP
+    # as the default, so taker must now be requested explicitly — the same
+    # discipline the v3 maker suite uses for vol_taker_mode:0.
     configs = {
         "trading_pair": PAIR,
+        "vol_execution_algo": "taker",
         "total_amount_quote": "100",
         # 10 bp/leg all-in keeps the arithmetic legible in assertions.
         "spot_taker_fee_rate": "0.0009",
@@ -40,12 +44,12 @@ def _vb(adapter, orch, **cfg):
     )
 
 
-def test_taker_is_the_default_and_buys_at_market():
+def test_taker_mode_crosses_with_a_bounded_limit():
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
         orch = ExecutorOrchestrator()
         c = _vb(adapter, orch)
-        assert c.taker_mode is True, "v4 ships taker-by-default"
+        assert c.taker_mode is True and c.execution_algo == "taker"
         await orch.spawn_controller(c)
         assert adapter.placed, "a taker buy must be submitted on start"
         # Marketable LIMIT, not naked MARKET: it crosses the book (immediate
@@ -126,6 +130,8 @@ def test_session_loss_limit_stops_the_bot_flat():
         # Stopped FLAT — the cycle closed before the check, so nothing is left.
         assert c.close_base_remaining == 0
         assert c.entry_base - c.sold_base <= 0
+
+    asyncio.run(body())
 
 
 def test_session_loss_limit_disabled_when_zero():
@@ -233,6 +239,8 @@ def test_F1_taker_orders_are_price_bounded_not_naked_market():
         assert sell.order_type is not OrderType.MARKET
         assert sell.price is not None and sell.price > 0
 
+    asyncio.run(body())
+
 
 def test_F4_unsold_inventory_stops_instead_of_buying_on_top():
     """Exhausting sell attempts on a REAL position must end the session, not
@@ -317,5 +325,281 @@ def test_flat_between_cycles_so_nothing_is_exposed_at_the_stop():
         await orch.tick_controller(c.id)
         assert c.entry_base - c.sold_base <= 0, "flat after the round trip"
         assert c.close_base_remaining == 0
+
+    asyncio.run(body())
+
+
+# --------------------------------------------------------------------------
+# TAKER-REST-STALL (found in self-review, 2026-07-31). A marketable LIMIT is
+# NOT an IOC: if the book cannot fill it within the slippage bound the
+# remainder RESTS. Taker mode disables the maker requote/cross rescues, so
+# without a taker-specific timeout the leg sits forever holding a partial
+# position — a stall AND an exposed position.
+# --------------------------------------------------------------------------
+def test_partially_swept_taker_buy_does_not_rest_forever():
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_taker_fill_timeout_seconds=5.0)
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        half = buy.order.amount_base / Decimal(2)
+        # Thin book: only half sweeps, the rest RESTS (order stays OPEN).
+        adapter.fill_order(buy.order.id, amount=half, price=Decimal("100"), partial=True)
+
+        # Before the timeout the leg is legitimately still working.
+        await orch.tick_controller(c.id)
+        assert c.phase == "pending_fill"
+        assert c.sell_id is None
+
+        c.leg_quoted_ts -= 60.0          # timeout elapses
+        await orch.tick_controller(c.id)
+
+        assert c.sell_id is not None, "must stop resting and sell what it holds"
+        assert c.phase == "pending_close_fill"
+        sell = orch.get(c.sell_id)
+        assert sell.order.amount_base == half
+
+    asyncio.run(body())
+
+
+def test_unfilled_taker_buy_reprices_with_taker_geometry():
+    """A taker requote must re-place MARKETABLE, never post a passive maker
+    bid — otherwise the rescue silently converts the strategy to maker."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("20"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_taker_fill_timeout_seconds=5.0)
+        await orch.spawn_controller(c)
+        first = adapter.placed[0]
+        c.leg_quoted_ts -= 60.0          # nothing filled; timeout elapses
+        await orch.tick_controller(c.id)
+
+        assert len(adapter.placed) == 2, "must cancel and re-place"
+        repriced = adapter.placed[-1]
+        assert repriced.order_type is OrderType.LIMIT
+        book = await adapter.order_book(PAIR)
+        assert repriced.price >= book.best_ask, (
+            "a taker re-place must still be marketable (at/through the ask), "
+            f"got {repriced.price} vs ask {book.best_ask}"
+        )
+        assert c.entry_base == 0
+
+    asyncio.run(body())
+
+
+def test_resting_taker_sell_is_repriced_not_left_hanging():
+    """An exit that cannot fully sweep must be re-placed at the fresh bid —
+    leaving it resting leaves the user holding the unsold remainder."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_taker_fill_timeout_seconds=5.0,
+                target_volume_usd="1000000")
+        await orch.spawn_controller(c)
+        adapter.fill_order(orch.get(c.buy_id).order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+        assert c.phase == "pending_close_fill"
+        first_sell_id = c.sell_id
+        placed_before = len(adapter.placed)
+
+        c.leg_quoted_ts -= 60.0          # the sell rests, timeout elapses
+        await orch.tick_controller(c.id)
+
+        assert len(adapter.placed) > placed_before, "the exit must be re-placed"
+        assert c.sell_id != first_sell_id
+        assert c.entry_base - c.sold_base > 0, "still holding, still working the exit"
+        assert not c.completed
+
+    asyncio.run(body())
+
+
+# --------------------------------------------------------------------------
+# VOL-STOP-RESET (self-review 2026-07-31). The 5%-of-margin stop is enforced
+# against the CONTROLLER's in-memory cumulative PnL. A rebuild (recovery /
+# worker handoff) reset it to 0 and restarted the whole loss budget — and the
+# max_cycles cap with it — so a run could bleed several multiples of the
+# user's stop. Same class of bug DN's restore_* keys already fixed.
+# --------------------------------------------------------------------------
+def test_rebuilt_controller_resumes_the_loss_budget():
+    adapter = SpreadAdapter(mid=Decimal(100), auto_fill_market=False)
+    c = _vb(
+        adapter, ExecutorOrchestrator(),
+        vol_session_loss_limit_usd="5",
+        restore_session_realized_pnl_usd=-4.80,
+        restore_cycles_completed=37,
+        restore_session_volume_usd=7400.0,
+    )
+    assert c.session_realized_pnl_usd == Decimal("-4.80"), "must resume, not restart"
+    assert c.cycles_completed == 37
+    assert c.session_volume_usd == Decimal("7400.0")
+    # Still inside the budget...
+    assert c._session_loss_breached() is False
+    # ...and one more losing cycle trips it, instead of getting a fresh $5.
+    c.session_realized_pnl_usd = Decimal("-5.01")
+    assert c._session_loss_breached() is True
+
+
+def test_fresh_controller_starts_from_zero():
+    """A new run must never inherit a prior run's counters (the runs>0 guard in
+    run_engine_cycle is what enforces this upstream)."""
+    adapter = SpreadAdapter(mid=Decimal(100), auto_fill_market=False)
+    c = _vb(adapter, ExecutorOrchestrator(), vol_session_loss_limit_usd="5")
+    assert c.session_realized_pnl_usd == Decimal(0)
+    assert c.cycles_completed == 0
+    assert c.session_volume_usd == Decimal(0)
+
+
+# --------------------------------------------------------------------------
+# VOL-SWEEP-OVERREACH (self-review 2026-07-31). The stop sweep is sized from
+# state. It used to fall back to vol_entry_size — the last cycle's BUY size,
+# which _finish_cycle never resets — so a FLAT bot authorised a sweep capped
+# at that size, and stop_volume_spot_cleanup's min(wallet, cap) would sell the
+# user's OWN pre-existing spot. Selling a user's unrelated assets is
+# irreversible; this is the most dangerous direction to get wrong.
+# --------------------------------------------------------------------------
+def test_flat_bot_authorises_no_sweep_at_all():
+    from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="0")
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+        sell = orch.get(c.sell_id)
+        adapter.fill_order(sell.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        assert c.entry_base - c.sold_base == 0, "precondition: the bot is flat"
+        state = dict(c.volume_metrics())
+        assert state["vol_entry_size"] > 0, "the stale key is still populated"
+        assert _volume_spot_managed_size(state) == 0.0, (
+            "a flat bot must authorise NO sweep — otherwise min(wallet, cap) "
+            "sells the user's own pre-existing spot balance"
+        )
+
+    asyncio.run(body())
+
+
+def test_holding_bot_authorises_exactly_what_it_holds():
+    from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="1000000")
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        held = float(c.entry_base - c.sold_base)
+        assert held > 0
+        assert _volume_spot_managed_size(dict(c.volume_metrics())) == held
+
+    asyncio.run(body())
+
+
+def test_unsold_inventory_stop_still_reports_what_is_held():
+    """_complete("unsold_inventory") means base IS still held — the sweep must
+    be able to size it, or the completion path strands the position."""
+    from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="1000000")
+        await orch.spawn_controller(c)
+        adapter.fill_order(orch.get(c.buy_id).order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        held = float(c.entry_base - c.sold_base)
+        c.sell_attempts = c._MAX_SELL_ATTEMPTS
+        await adapter.cancel_order(orch.get(c.sell_id).order.id)
+        await orch.tick_controller(c.id)
+
+        assert c.completed and c.stop_reason == "unsold_inventory"
+        assert _volume_spot_managed_size(dict(c.volume_metrics())) == held, (
+            "the completion sweep must know exactly what is still held"
+        )
+
+    asyncio.run(body())
+
+
+def test_unfilled_buy_authorises_no_sweep():
+    """An in-flight buy must NOT authorise a sweep sized by its order size —
+    if it never filled, that would sell the user's own pre-existing spot.
+    Capping at booked inventory keeps the irreversible mistake impossible."""
+    async def body():
+        from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch)
+        await orch.spawn_controller(c)
+        assert c.phase == "pending_fill"
+        assert _volume_spot_managed_size(dict(c.volume_metrics())) == 0.0
+
+    asyncio.run(body())
+
+
+def test_requote_budget_is_per_cycle_not_per_session():
+    """_MAX_REQUOTES_PER_CYCLE bounds the taker rest-stall rescue. If the
+    counter never resets it becomes a session budget, and after 120 cumulative
+    requotes the rescue stops firing and the stall returns."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="0")
+        await orch.spawn_controller(c)
+        c.requotes = 42
+        adapter.fill_order(orch.get(c.buy_id).order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+        sell = orch.get(c.sell_id)
+        adapter.fill_order(sell.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        assert c.cycles_completed == 1
+        assert c.requotes == 0, "the per-cycle requote budget must reset"
+
+    asyncio.run(body())
+
+
+def test_unsold_inventory_stop_still_books_the_cycle():
+    """Stopping on unsold base must not lose the volume and realized loss the
+    cycle DID trade — that under-reports volume and under-counts the loss
+    limit."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="1000000")
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+
+        # Partially close, then exhaust the attempts on the remainder.
+        sell = orch.get(c.sell_id)
+        part = sell.order.amount_base / Decimal(4)
+        adapter.fill_order(sell.order.id, amount=part, price=Decimal("100"), partial=True)
+        c.sell_attempts = c._MAX_SELL_ATTEMPTS
+        await adapter.cancel_order(sell.order.id)
+        await orch.tick_controller(c.id)
+
+        assert c.completed and c.stop_reason == "unsold_inventory"
+        assert c.cycles_completed == 1, "the cycle must be booked, not dropped"
+        assert c.session_volume_usd > 0, "the volume actually traded must count"
 
     asyncio.run(body())

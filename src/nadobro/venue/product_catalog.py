@@ -1079,6 +1079,23 @@ def get_spot_maker_fee_rate(
     return _x18_to_float(row.get("maker_fee_rate_x18"))
 
 
+def get_spot_min_notional_usd(
+    name: str,
+    network: str = "mainnet",
+    refresh: bool = False,
+) -> Optional[float]:
+    """Minimum quote notional (USD) for a SPOT product.
+
+    The perp-side ``get_product_min_quote_notional_usd`` resolves a PERP row
+    and therefore returns None for every spot product — callers sizing a spot
+    order (Volume Bot) silently lost the floor entirely.
+    """
+    row = get_spot_metadata(name, network=network, refresh=refresh)
+    if not row:
+        return None
+    return _x18_to_float(row.get("min_size_x18"))
+
+
 def get_spot_taker_fee_rate(
     name: str,
     network: str = "mainnet",

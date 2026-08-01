@@ -115,7 +115,59 @@ class VolumeBotController(Controller):
         # target actually completes (v3's resting quotes stalled: one sell
         # rested 8.5h; a session reached $101 of a $10,000 target). 0 restores
         # the v3 maker path — a reversible kill-switch, not dead config.
-        self.taker_mode = bool(_dec(self.cfg("vol_taker_mode", 1)) != 0)
+        # EXECUTION ALGO (2026-07-31). One selector replaces the old
+        # taker-on/off boolean:
+        #   "twap"  — maker TWAP (DEFAULT): rest post-only at the touch, pace
+        #             against a linear schedule, chase patiently, and cross
+        #             only when the leg falls materially behind.
+        #   "chase" — same ladder, impatient: short chase interval, early
+        #             escalation. The fill-certainty end of the dial.
+        #   "taker" — cross immediately (the v4.1 behaviour, kept as an opt-in
+        #             and as the kill-switch).
+        # Measured on KBTC spot: a taker round trip costs 14.3bp (5.7bp spread
+        # + 2x4.3bp) versus 3.6bp resting — ~4x the volume per unit of the
+        # session loss budget. Price impact at this size is 0.00bp, so resting
+        # is the entire prize; nothing here is about impact.
+        _algo = str(self.cfg("vol_execution_algo", "twap") or "twap").strip().lower()
+        if _algo not in ("twap", "chase", "taker"):
+            _algo = "twap"
+        # Back-compat: an explicit vol_taker_mode=1 still forces the taker path
+        # (it is the documented kill-switch), and =0 forces a maker path.
+        _legacy = self.cfg("vol_taker_mode", None)
+        if _legacy is not None:
+            _algo = "taker" if _dec(_legacy) != 0 else (
+                _algo if _algo != "taker" else "twap"
+            )
+        self.execution_algo = _algo
+        self.taker_mode = _algo == "taker"
+        self.maker_mode = not self.taker_mode
+        # Pacing horizon for the maker schedule. The leg should be done inside
+        # this window; debt against it is what escalates the ladder.
+        self.twap_horizon_seconds = float(
+            self.cfg("vol_twap_horizon_seconds", 120.0 if _algo == "twap" else 30.0) or 0.0
+        )
+        self.twap_slices = int(_dec(self.cfg("vol_twap_slices", 4)) or 4)
+        # How far behind schedule (as a fraction of the leg) before crossing,
+        # and how much of the leg may be crossed in total.
+        self.cross_tolerance_frac = _dec(self.cfg("vol_cross_tolerance_frac", "0.5"))
+        self.max_taker_frac = _dec(self.cfg("vol_max_taker_frac", "0.25"))
+        # Hard deadline as a multiple of the horizon. Past it a maker leg
+        # crosses regardless of schedule debt or taker budget — the valve that
+        # makes "patient" bounded rather than indefinite. 0 disables (unwise).
+        self.leg_hard_deadline_mult = float(
+            self.cfg("vol_leg_hard_deadline_mult", 3.0) or 0.0
+        )
+        # Chase cadence: how long a resting child may sit before it is
+        # cancelled and re-posted at the fresh touch.
+        self.chase_interval_seconds = float(
+            self.cfg("vol_chase_interval_seconds", 20.0 if _algo == "twap" else 5.0) or 0.0
+        )
+        # Execution telemetry (per session) — proves the maker prize is real.
+        self.maker_fills = 0
+        self.taker_fills = 0
+        self.chases = 0
+        self.crossed_quote = Decimal(0)
+        self.leg_started_quote_ts = 0.0
         self.taker_fee_rate = self._taker_fee_rate()
         self.builder_fee_rate = _non_negative_decimal(
             self.cfg("vol_builder_fee_rate", DEFAULT_BUILDER_FEE_RATE)
@@ -132,6 +184,16 @@ class VolumeBotController(Controller):
         self.session_loss_limit_usd = _non_negative_decimal(
             self.cfg("vol_session_loss_limit_usd", 0)
         )
+        # TAKER-REST-STALL (2026-07-31): a marketable LIMIT is not an IOC. If
+        # the book has less size than our order within the slippage bound, the
+        # remainder RESTS instead of cancelling — and taker mode disables the
+        # maker requote/cross rescues, so the leg would sit forever holding a
+        # partial position. Any taker leg still live after this long is
+        # cancelled and re-placed at the fresh touch (a partially filled buy
+        # flips straight to selling what it actually got). 0 disables.
+        self.taker_fill_timeout_seconds = float(
+            self.cfg("vol_taker_fill_timeout_seconds", 10.0) or 0.0
+        )
         # AUDIT-VOL-2026-07-31 F1: "taker" is executed as a MARKETABLE LIMIT,
         # not a naked MARKET. NadoClient.place_market_order is an IOC priced
         # +/-slippage_pct through the touch (default 1%) and the adapter never
@@ -147,9 +209,18 @@ class VolumeBotController(Controller):
         # user holding base the bot opened.
         self._emergency_exit_reason = ""
 
-        self.session_volume_usd: Decimal = Decimal(0)
-        self.session_realized_pnl_usd: Decimal = Decimal(0)
-        self.cycles_completed = 0
+        # Cumulative session progress. RESTORED on a rebuild (recovery / worker
+        # handoff) from the state the worker persists each cycle — otherwise a
+        # rebuild would zero the loss counter and restart the user's 5% stop
+        # budget (and the max_cycles cap) mid-run. See VOL-STOP-RESET in
+        # engine_runtime.run_engine_cycle; same pattern as DN's restore_*.
+        self.session_volume_usd: Decimal = _non_negative_decimal(
+            self.cfg("restore_session_volume_usd", 0)
+        )
+        self.session_realized_pnl_usd: Decimal = _dec(
+            self.cfg("restore_session_realized_pnl_usd", 0) or 0
+        )
+        self.cycles_completed = max(0, int(_dec(self.cfg("restore_cycles_completed", 0) or 0)))
         self.completed = False
         self.stop_reason = ""
         self.phase = "idle"
@@ -213,6 +284,73 @@ class VolumeBotController(Controller):
 
     def _taker_all_in_rate(self) -> Decimal:
         return self.taker_fee_rate + self.builder_fee_rate
+
+    def _leg_should_cross(self, total_quote: Decimal, filled_quote: Decimal) -> bool:
+        """Has this leg fallen far enough behind its TWAP schedule to justify
+        paying the taker fee?
+
+        Replaces the v3 fixed ``vol_cross_after_seconds`` deadline. A wall-clock
+        deadline crosses even when the leg is nearly done; schedule debt only
+        crosses when we are actually behind, which is what keeps the maker
+        prize (~4x volume per unit of loss budget) intact. The taker budget
+        (``vol_max_taker_frac``) is the second brake: past it we deliberately
+        run late rather than silently revert to the taker cost curve.
+        """
+        from src.nadobro.quant.twap_schedule import should_cross
+
+        if self.taker_mode or total_quote <= 0:
+            return False
+        elapsed = (time.time() - self.leg_started_ts) if self.leg_started_ts else 0.0
+        # SAFETY VALVE (self-review 2026-07-31): patience must have a hard end.
+        # Schedule debt alone cannot rescue a leg that is PARTIALLY filled —
+        # e.g. 60% done leaves 40% of debt, under the 50% tolerance, so it
+        # never escalates; once the chase budget is also spent the leg rests
+        # forever and the cycle never completes. That is precisely the v3
+        # stall this work exists to remove, and it is reachable with
+        # vol_chase_interval_seconds=0 even without exhausting chases.
+        #
+        # This valve deliberately BYPASSES the taker budget: a leg that can
+        # never complete is worse than paying the fee, the same reasoning that
+        # lets the v4.1 emergency exit price through the loss floor.
+        if self._leg_patience_exhausted(elapsed):
+            logger.info(
+                "volume_bot: patience exhausted on the %s leg (elapsed %.0fs, "
+                "chases %s) — crossing to finish it pair=%s controller=%s",
+                "sell" if self.phase == "pending_close_fill" else "buy",
+                elapsed, self.requotes, self.trading_pair, self.id,
+            )
+            return True
+        return should_cross(
+            total_quote,
+            filled_quote=filled_quote,
+            elapsed_seconds=elapsed,
+            horizon_seconds=self.twap_horizon_seconds,
+            tolerance_frac=self.cross_tolerance_frac,
+            crossed_quote=self.crossed_quote,
+            max_taker_frac=self.max_taker_frac,
+        )
+
+    def _leg_patience_exhausted(self, elapsed: float) -> bool:
+        """Has the maker leg run out of passive options?
+
+        Either we have spent the per-cycle chase budget, or the leg has been
+        working for a hard multiple of its horizon. Both mean "resting is not
+        going to finish this", independently of how far behind schedule the
+        arithmetic says we are.
+        """
+        if self.requotes >= self._MAX_REQUOTES_PER_CYCLE:
+            return True
+        hard_deadline = self.twap_horizon_seconds * self.leg_hard_deadline_mult
+        return hard_deadline > 0 and elapsed >= hard_deadline
+
+    def _sell_leg_notional(self) -> Decimal:
+        """Quote notional the sell leg is unwinding (what the buy actually
+        cost), so the sell paces against real size rather than the configured
+        clip — a partial buy must not be measured against a full-size schedule.
+        """
+        if self.entry_base > 0 and self.entry_price > 0:
+            return self.entry_base * self.entry_price
+        return self.total_amount_quote
 
     def _session_loss_breached(self) -> bool:
         """Has cumulative realized PnL, NET OF FEES, hit the session limit?
@@ -431,6 +569,12 @@ class VolumeBotController(Controller):
             self.phase = "filled_wait_close"
             await self._start_sell_cycle()
             return True
+        if self.taker_mode:
+            # Re-place with TAKER geometry (marketable through the ask), not
+            # the maker join below — otherwise a taker requote would silently
+            # post a passive maker bid. Nothing filled, so the per-cycle reset
+            # inside _start_buy_cycle is a no-op.
+            return await self._start_buy_cycle()
         touch = await self._touch()
         if touch is None:
             self._enter_market_closed()
@@ -554,6 +698,18 @@ class VolumeBotController(Controller):
         bid, ask = touch
         self.crosses += 1
         self.leg_crossed = True
+        # Track quote notional crossed so the per-leg taker budget
+        # (vol_max_taker_frac) can actually bind — without this the "never
+        # cross more than N% of the leg" brake has nothing to measure.
+        try:
+            _rem = self.entry_base - self.sold_base
+            _px = self.entry_price if self.entry_price > 0 else Decimal(0)
+            self.crossed_quote += (
+                (_rem * _px) if (side is TradeType.SELL and _rem > 0 and _px > 0)
+                else max(Decimal(0), self.total_amount_quote - self.entry_quote)
+            )
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(telemetry only)
+            pass
         await self.orchestrator.stop(ex.id)  # type: ignore[attr-defined]
         slip = self.cross_slippage_bp / Decimal(10000)
         tick = self._tick()
@@ -684,6 +840,13 @@ class VolumeBotController(Controller):
             self.sold_fee_quote += _dec(getattr(order, "fee_quote", 0) or 0)
         self.close_base_remaining = max(Decimal(0), self.entry_base - self.sold_base)
 
+    def _attribute_fill(self, *, crossed: bool) -> None:
+        """Count a booked leg as maker or taker for the execution report."""
+        if crossed:
+            self.taker_fills += 1
+        else:
+            self.maker_fills += 1
+
     def _finish_cycle(self) -> None:
         """Book the completed round trip and reset per-cycle state."""
         self.session_volume_usd += self.sold_quote
@@ -694,6 +857,11 @@ class VolumeBotController(Controller):
         self.close_base_remaining = Decimal(0)
         self.buy_retries = 0
         self.sell_attempts = 0
+        # _MAX_REQUOTES_PER_CYCLE says PER CYCLE, but this counter was never
+        # reset — making it a per-SESSION budget. The taker rest-stall rescue
+        # is bounded by it, so after 120 cumulative requotes the rescue would
+        # stop firing and the stall would come back (self-review 2026-07-31).
+        self.requotes = 0
 
     # Set by requote/cross paths when the remainder went to zero mid-transition
     # (the fill landed between our cancel and the re-place).
@@ -777,24 +945,36 @@ class VolumeBotController(Controller):
                     self._sync_buy_progress(buy_ex)
                 leg_age = now - self.leg_started_ts if self.leg_started_ts else 0.0
                 quote_age = now - self.leg_quoted_ts if self.leg_quoted_ts else 0.0
-                # Requote/cross are MAKER mechanics: they exist to rescue a
-                # resting quote. A market order has no resting state to
-                # rescue, so they must never fire in taker mode.
+                # Cross-on-deadline is a MAKER mechanic (we are already
+                # crossing in taker mode), so it stays off here.
                 if (
                     not self.taker_mode
-                    and self.cross_after_seconds > 0
                     and not self.leg_crossed
-                    and leg_age >= self.cross_after_seconds
+                    and self._leg_should_cross(self.total_amount_quote, self.entry_quote)
                 ):
                     await self._cross_leg(buy_ex, TradeType.BUY)
                     return
+                # TAKER-REST-STALL: a marketable limit that could not fully
+                # sweep RESTS. Without this the leg would sit forever holding
+                # a partial fill, with both maker rescues disabled.
                 if (
-                    not self.taker_mode
-                    and self.requote_seconds > 0
-                    and not was_cross
-                    and quote_age >= self.requote_seconds
+                    self.taker_mode
+                    and self.taker_fill_timeout_seconds > 0
+                    and quote_age >= self.taker_fill_timeout_seconds
                     and self.requotes < self._MAX_REQUOTES_PER_CYCLE
                 ):
+                    await self._requote_buy(buy_ex)
+                    return
+                if (
+                    not self.taker_mode
+                    and self.chase_interval_seconds > 0
+                    and not was_cross
+                    and quote_age >= self.chase_interval_seconds
+                    and self.requotes < self._MAX_REQUOTES_PER_CYCLE
+                ):
+                    # CHASE: re-post at the fresh touch so the resting quote
+                    # keeps price-time priority as the book moves.
+                    self.chases += 1
                     await self._requote_buy(buy_ex)
                 return
             if was_cross:
@@ -805,6 +985,7 @@ class VolumeBotController(Controller):
                 # Fully or PARTIALLY filled then terminated: round-trip what we
                 # actually hold. Completing here without selling would strand
                 # the bought base in the user's wallet.
+                self._attribute_fill(crossed=self.taker_mode or self.leg_crossed)
                 self.session_volume_usd += self.entry_quote
                 self.phase = "filled_wait_close"
                 await self._start_sell_cycle()
@@ -856,26 +1037,38 @@ class VolumeBotController(Controller):
                 leg_age = now - self.leg_started_ts if self.leg_started_ts else 0.0
                 quote_age = now - self.leg_quoted_ts if self.leg_quoted_ts else 0.0
                 was_cross = self.last_order_kind == "sell_cross"
-                # Maker-only rescue mechanics (see the buy leg above).
+                # Maker-only rescue mechanic (see the buy leg above).
                 if (
                     not self.taker_mode
-                    and self.cross_after_seconds > 0
                     and not self.leg_crossed
-                    and leg_age >= self.cross_after_seconds
+                    and self._leg_should_cross(self._sell_leg_notional(), self.sold_quote)
                 ):
                     await self._cross_leg(sell_ex, TradeType.SELL)
                     return
+                # TAKER-REST-STALL: a sell that could not fully sweep RESTS,
+                # leaving the user holding the unsold remainder. Re-place it at
+                # the fresh bid — an exit must never be left to linger.
                 if (
-                    not self.taker_mode
-                    and self.requote_seconds > 0
-                    and not was_cross
-                    and quote_age >= self.requote_seconds
+                    self.taker_mode
+                    and self.taker_fill_timeout_seconds > 0
+                    and quote_age >= self.taker_fill_timeout_seconds
                     and self.requotes < self._MAX_REQUOTES_PER_CYCLE
                 ):
                     await self._requote_sell(sell_ex)
                     return
+                if (
+                    not self.taker_mode
+                    and self.chase_interval_seconds > 0
+                    and not was_cross
+                    and quote_age >= self.chase_interval_seconds
+                    and self.requotes < self._MAX_REQUOTES_PER_CYCLE
+                ):
+                    self.chases += 1
+                    await self._requote_sell(sell_ex)
+                    return
                 return
             self._book_sell_fill(sell_ex)
+            self._attribute_fill(crossed=self.taker_mode or self.leg_crossed)
             remaining = self.entry_base - self.sold_base
             if remaining > 0:
                 # Partial close: re-place the remainder unless it is venue dust
@@ -901,6 +1094,11 @@ class VolumeBotController(Controller):
                         "pair=%s controller=%s",
                         remaining, self.sell_attempts, self.trading_pair, self.id,
                     )
+                    # Book what this cycle DID trade before stopping —
+                    # returning straight to _complete skipped _finish_cycle,
+                    # losing the sold volume and the realized loss from the
+                    # session totals (and so from the loss limit).
+                    self._finish_cycle()
                     self.close_base_remaining = remaining
                     self._complete("unsold_inventory")
                     return
@@ -927,10 +1125,38 @@ class VolumeBotController(Controller):
             "vol_entry_price": float(self.entry_price),
             "vol_entry_fill_ts": float(self.entry_fill_ts or 0.0),
             "vol_close_size": float(self.close_base_remaining),
+            # AUTHORITATIVE "how much base does the BOT still hold right now".
+            # The stop sweep sizes from this. vol_entry_size is the last cycle's
+            # BUY size and is never reset by _finish_cycle, so using it as a
+            # fallback let a FLAT bot authorise a sweep capped at the last
+            # cycle's size — which min()s against the wallet and sells the
+            # USER'S OWN pre-existing spot (self-review 2026-07-31).
+            # AUTHORITATIVE "how much base does the BOT still hold right now".
+            # KNOWN WINDOW: this is refreshed when the controller ticks, so a
+            # manual stop landing between a venue fill and the next tick (~5s)
+            # sizes 0 and leaves that base in the wallet. Reading the executor's
+            # cached order does NOT close it (the snapshot is equally stale),
+            # and capping by the ORDER SIZE instead would let an UNFILLED buy
+            # authorise selling the user's own pre-existing spot — strictly
+            # worse, since that is irreversible. The rail path is already
+            # covered: bot_runtime merges these counters before it can fire.
+            "vol_open_base": float(max(Decimal(0), self.entry_base - self.sold_base)),
             # Expected all-in cost of one taker round trip (both legs' fees;
             # the spread is on top and varies with the book). Surfaced so the
             # user can see WHY the session loss limit approaches — with no
             # profit gate, every cycle costs this by construction.
+            "vol_execution_algo": self.execution_algo,
+            "vol_maker_fills": int(self.maker_fills),
+            "vol_taker_fills": int(self.taker_fills),
+            "vol_chases": int(self.chases),
+            "vol_crossed_quote": float(self.crossed_quote),
+            # Share of legs that rested (paid maker) rather than crossed. This
+            # is the number that proves the ~4x volume-per-loss-budget claim is
+            # being realised in production rather than just in the design doc.
+            "vol_maker_fill_ratio": (
+                float(self.maker_fills) / float(self.maker_fills + self.taker_fills)
+                if (self.maker_fills + self.taker_fills) > 0 else 0.0
+            ),
             "vol_round_trip_fee_bp": float(self._taker_all_in_rate() * Decimal(20000)),
             "vol_session_loss_limit_usd": float(self.session_loss_limit_usd),
             "vol_requotes": int(self.requotes),

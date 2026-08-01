@@ -311,22 +311,35 @@ def test_map_vol_config_enforces_the_margin_band():
     assert ok["total_amount_quote"] == Decimal("250")
 
 
-def test_map_vol_config_defaults_to_taker_with_nonzero_fee_rates():
-    """v4: market orders both legs by default, and the breakeven gate must
-    never see a 0 fee rate (that would make a round trip look free and sell
-    at a real loss). vol_taker_mode=0 restores the v3 maker path."""
+def test_map_vol_config_defaults_to_maker_twap():
+    """v4.2: maker TWAP is the shipped default. Measured on KBTC spot, resting
+    costs 3.6bp per round trip vs 14.3bp crossing — ~4x the volume per unit of
+    the session loss budget. The legacy vol_taker_mode kill-switch must NOT be
+    defaulted, or it would pin every run to taker and this default could never
+    take effect."""
     cfg = er.map_strategy_config(
         "vol", {"session_margin_usd": 100.0}, Decimal(100), product="KBTC-USDC",
     )
-    assert cfg["vol_taker_mode"] == 1.0
+    assert cfg["vol_execution_algo"] == "twap"
+    assert "vol_taker_mode" not in cfg, "the kill-switch must not be defaulted on"
+    assert cfg["vol_twap_horizon_seconds"] == 120.0
+    assert cfg["vol_max_taker_frac"] == 0.25
+    # The breakeven gate must never see a 0 fee rate.
     assert Decimal(str(cfg["spot_taker_fee_rate"])) > 0
-    assert Decimal(str(cfg["vol_builder_fee_rate"])) >= 0
 
-    maker = er.map_strategy_config(
-        "vol", {"session_margin_usd": 100.0, "vol_taker_mode": 0},
+    for algo in ("chase", "taker"):
+        c = er.map_strategy_config(
+            "vol", {"session_margin_usd": 100.0, "vol_execution_algo": algo},
+            Decimal(100), product="KBTC-USDC",
+        )
+        assert c["vol_execution_algo"] == algo
+
+    # Explicit legacy kill-switch still forwards.
+    legacy = er.map_strategy_config(
+        "vol", {"session_margin_usd": 100.0, "vol_taker_mode": 1},
         Decimal(100), product="KBTC-USDC",
     )
-    assert maker["vol_taker_mode"] == 0.0
+    assert legacy["vol_taker_mode"] == 1.0
 
 
 def test_map_vol_config_normalizes_dashed_and_bare_product():

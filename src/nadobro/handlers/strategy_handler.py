@@ -212,9 +212,12 @@ def _vol_fee_estimate(telegram_id: int, product: str, network: str):
     # that understates the money at risk is not consent.
     try:
         from src.nadobro.quant.mm_quote_math import min_closeable_entry_notional
-        from src.nadobro.venue.product_catalog import get_product_min_quote_notional_usd
+        from src.nadobro.venue.product_catalog import get_spot_min_notional_usd
 
-        venue_min = get_product_min_quote_notional_usd(product, network=network) or 0.0
+        # SPOT accessor: get_product_min_quote_notional_usd resolves a PERP row
+        # and returns None for every spot Volume pair (KBTC, WETH, …), so this
+        # floor was dead exactly where it applies (self-review 2026-07-31).
+        venue_min = get_spot_min_notional_usd(product, network=network) or 0.0
         floor = float(min_closeable_entry_notional(float(venue_min)) or 0.0)
         if floor > float(margin or 0):
             margin = floor
@@ -225,6 +228,20 @@ def _vol_fee_estimate(telegram_id: int, product: str, network: str):
         target_volume_usd=conf.get("target_volume_usd", 0.0),
         taker_fee_rate=taker,
         builder_fee_rate=builder,
+    )
+
+
+def _vol_fee_quote_key(est, sl_pct: float) -> tuple:
+    """Identity of the charges a fee card quoted.
+
+    Compared at ack time so consent can only start a run on the numbers the
+    user actually saw. Every field here is one the user is agreeing to.
+    """
+    return (
+        str(est.margin_usd),
+        str(est.target_volume_usd),
+        str(est.total_rate),
+        f"{float(sl_pct):.4f}",
     )
 
 
@@ -987,6 +1004,8 @@ async def _handle_strategy(query, data, context, telegram_id):
             "funding_entry_mode": {"wait", "enter_anyway"},
             # Phase 2: Tread Fi POV / participation preset.
             "participation_preset": {"aggressive", "normal", "passive", "off"},
+            # Volume Bot execution algo (maker TWAP default / chase / taker).
+            "vol_execution_algo": {"twap", "chase", "taker"},
         }
         allowed_vals = allowed_text.get(field, set())
         if raw_value not in allowed_vals:
@@ -1216,6 +1235,12 @@ async def _handle_strategy(query, data, context, telegram_id):
                 _vol_fee_estimate, telegram_id, product, network
             )
             _vol_sl = float((strategy_conf or {}).get("sl_pct") or 0.0)
+            # CONSENT INTEGRITY: remember exactly what this card quoted. The
+            # callback carries only the product, so without this a settings
+            # change between rendering and tapping would start the run on
+            # numbers the user never saw — and the ack record would rewrite
+            # itself to match, destroying the audit trail too.
+            context.user_data["vol_fee_quote"] = _vol_fee_quote_key(vol_est, _vol_sl)
             await _edit_loc(
                 query,
                 _vol_fee_agreement_text(vol_est, product, network, sl_pct=_vol_sl),
@@ -1232,6 +1257,35 @@ async def _handle_strategy(query, data, context, telegram_id):
             )
             return
         if strategy_id == "vol" and fee_agreed:
+            # Re-quote and compare against what the card actually showed. Any
+            # drift (margin, target, rate, stop) means this consent was given
+            # for different charges — re-render and make the user agree again
+            # rather than trade on numbers they never saw.
+            _live_est = await run_blocking(
+                _vol_fee_estimate, telegram_id, product, network
+            )
+            _live_sl = float((strategy_conf or {}).get("sl_pct") or 0.0)
+            _live_key = _vol_fee_quote_key(_live_est, _live_sl)
+            if context.user_data.get("vol_fee_quote") != _live_key:
+                context.user_data["vol_fee_quote"] = _live_key
+                await _edit_loc(
+                    query,
+                    "⚠️ *Your settings changed since this quote\\.*\n\n"
+                    + _vol_fee_agreement_text(
+                        _live_est, product, network, sl_pct=_live_sl
+                    ),
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "✅ Agree & Start",
+                            callback_data=f"strategy:startok:vol:{product}",
+                        )],
+                        [InlineKeyboardButton(
+                            "◀ Back", callback_data="strategy:preview:vol",
+                        )],
+                    ]),
+                )
+                return
             # AUDIT-VOL-2026-07-31 F8: the start result arrives as a NEW
             # message, so the fee card and its "Agree & Start" button stay
             # live. Re-tapping later re-reads settings and could start with a
@@ -1605,8 +1659,15 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         tp_pct = float(conf.get("tp_pct", 1.0))
         sl_pct = float(conf.get("sl_pct", 1.0))
         _vol_margin = float(conf.get("session_margin_usd", conf.get("notional_usd", 100.0)) or 100.0)
+        _algo = str(conf.get("vol_execution_algo") or "twap").lower()
+        _algo_label = {
+            "twap": "Maker TWAP (rests, ~4x cheaper)",
+            "chase": "Chase (maker, fills faster)",
+            "taker": "Taker (crosses, most expensive)",
+        }.get(_algo, _algo)
         return (
             "⚙️ *Vol Bot · TP / SL*\n\n"
+            f"Execution: *{escape_md(_algo_label)}*\n"
             f"Current TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}*\n"
             f"Margin per cycle: {_leg_size_display(_vol_margin, str(conf.get('product') or ''), network)}\n\n"
             "Choose quick presets or set custom values\\."
@@ -1807,6 +1868,14 @@ def _strategy_config_section_kb(strategy: str, section: str):
             ],
             [
                 InlineKeyboardButton("✍️ Custom TP", callback_data="strategy:input:vol:tp_pct"),
+            ],
+            [
+                # EXECUTION ALGO. Maker TWAP is the default: measured on KBTC
+                # spot a taker round trip costs 14.3bp vs 3.6bp resting, i.e.
+                # ~4x the volume for the same stop budget.
+                InlineKeyboardButton("⏱ Maker TWAP", callback_data="strategy:set_text:vol:vol_execution_algo:twap"),
+                InlineKeyboardButton("🏃 Chase", callback_data="strategy:set_text:vol:vol_execution_algo:chase"),
+                InlineKeyboardButton("⚡ Taker", callback_data="strategy:set_text:vol:vol_execution_algo:taker"),
             ],
             [
                 # Every taker round trip costs spread + both legs' fees, so

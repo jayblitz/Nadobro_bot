@@ -20,6 +20,18 @@ def _volume_spot_managed_size(state: dict[str, Any]) -> float:
     # a stop landing mid-cycle never resolves to "nothing to close" and leaves
     # the user exposed (hold_for_profit is the legacy v4 park state — reachable
     # on a session restarted across the v4.1 deploy).
+    # VOL-SWEEP-OVERREACH (self-review 2026-07-31): prefer the controller's
+    # authoritative "still held right now" figure. The legacy keys below fall
+    # back to vol_entry_size — the last cycle's BUY size, which _finish_cycle
+    # never resets — so a FLAT bot authorised a sweep capped at that size, and
+    # stop_volume_spot_cleanup's min(wallet_balance, cap) would then sell the
+    # user's OWN pre-existing spot holdings. Selling a user's unrelated assets
+    # is irreversible; a 0 here correctly sweeps nothing.
+    if "vol_open_base" in state:
+        try:
+            return max(0.0, float(state.get("vol_open_base") or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
     if (
         phase not in ("filled_wait_close", "pending_close_fill", "hold_for_profit")
         and entry_ts <= 0

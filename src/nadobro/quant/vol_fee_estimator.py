@@ -20,17 +20,25 @@ from dataclasses import dataclass
 from decimal import ROUND_CEILING, Decimal
 from typing import Optional
 
-# Measured from production fills (2026-07-31): taker rows in engine_executors
-# (MARKET and crossed LIMIT) sit at 4.30-4.34 bp of notional across BTC-PERP,
-# KBTC and BTC-USDT0; resting post-only makers sit at 1.80 bp. Used only when
-# the product catalog does not carry a venue taker rate (the all_products
-# gateway query frequently omits the fee fields).
-DEFAULT_SPOT_TAKER_FEE_RATE = Decimal("0.00043")   # 4.3 bp
+# Venue BASE taker rate, i.e. EXCLUDING the builder share — the same basis the
+# product catalog reports, because callers add the builder rate on top.
+#
+# Provenance (settled 2026-07-31 against production): the venue's charged fee
+# (``order.fee_quote``) is ALL-IN — engine_persistence states it outright and
+# splits the builder out purely for attribution
+# (``fill_fee = venue_fee - notional*1bp``). Measured all-in taker is
+# 4.30-4.44 bp, and the catalog quotes 3.50 bp for KBTC, so
+# catalog_base + 1 bp builder == the charged all-in. This constant must
+# therefore be a BASE rate too: 4.3 all-in - 1.0 builder = 3.3 bp. Using the
+# all-in figure here counted the builder twice and over-quoted the card by
+# ~20%.
+DEFAULT_SPOT_TAKER_FEE_RATE = Decimal("0.00033")   # 3.3 bp base (4.3 bp all-in)
 
 # Builder routing is locked to 1 bps by policy (config.get_nado_builder_routing_config;
-# testnet routes without a builder and pays 0). trades_mainnet.builder_fee is a
-# SEPARATE column from fill_fee and measures exactly 1.000 bp on KBTC/WNVDAX
-# rows, confirming it is charged on top of the venue fee rather than bundled.
+# testnet routes without a builder and pays 0). Added on top of the CATALOG
+# BASE rate to reach the charged all-in. (Do not cite trades_mainnet.builder_fee
+# as evidence of the fee's structure: that column is COMPUTED as
+# notional x 0.0001, so it reads 1.000 bp tautologically.)
 DEFAULT_BUILDER_FEE_RATE = Decimal("0.0001")       # 1.0 bp
 
 # Product decision (2026-07-31): the spot volume bot sizes each cycle inside
