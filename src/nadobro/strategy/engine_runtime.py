@@ -1033,6 +1033,12 @@ def map_strategy_config(
             # this far through the touch (AUDIT-VOL-2026-07-31 F1 — a naked
             # MARKET is an IOC at 1% that the adapter never overrides).
             "vol_taker_slippage_bp": _f(settings, "vol_taker_slippage_bp", 15.0),
+            # A marketable limit RESTS if it cannot fully sweep, and taker mode
+            # disables the maker rescues — so a taker leg still live after this
+            # long is cancelled and re-placed (TAKER-REST-STALL).
+            "vol_taker_fill_timeout_seconds": _f(
+                settings, "vol_taker_fill_timeout_seconds", 10.0
+            ),
             # SESSION LOSS LIMIT (user directive 2026-07-31): stop and flatten
             # once cumulative realized PnL NET OF FEES reaches -sl_pct% of
             # margin — 5% of a $100 margin is -$5. Enforced in the CONTROLLER
@@ -2183,6 +2189,19 @@ async def _run_engine_cycle_locked(
                                 )
                 except Exception:  # noqa: BLE001 - restore is best-effort, never block start
                     logger.debug("dn progress restore skipped", exc_info=True)
+        # VOL-STOP-RESET (self-review 2026-07-31): the 5%-of-margin session loss
+        # limit is enforced against the CONTROLLER's own cumulative PnL, which
+        # lives in memory. A rebuild (recovery / worker handoff) reset it to 0
+        # and restarted the whole loss budget — and the max_cycles cap with it,
+        # so a run could bleed several multiples of the user's stop. Restore
+        # both from the state the worker already persists each cycle. Same
+        # runs>0 guard as DN: a fresh start must never inherit a prior run.
+        if strategy == "vol" and int(_f(state, "runs", 0)) > 0:
+            configs["restore_session_realized_pnl_usd"] = _f(
+                state, "session_realized_pnl_usd", 0.0
+            )
+            configs["restore_cycles_completed"] = int(_f(state, "vol_cycles_completed", 0.0))
+            configs["restore_session_volume_usd"] = _f(state, "volume_done_usd", 0.0)
         # Fill-anchored (grid/rgrid) exposure VWAP must be peculiar to THIS
         # session + user. Seed it from the run's OWN recorded fills
         # (get_session_recent_fills is scoped by strategy_session_id + user_id) so

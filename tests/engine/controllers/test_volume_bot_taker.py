@@ -1,9 +1,9 @@
 """Volume Bot v4.1 — taker mode (docs/volume_bot_taker_v4.md).
 
-Both legs are taker orders (marketable limits, price-bounded), and
-sell is PATIENT: it waits for a price strictly above the entry that also
-clears both legs' fees ("buy lower, sell higher than it bought"), with a
-bounded-loss concession after a stall so the run can never hang forever.
+Both legs are taker orders (marketable limits, price-bounded) fired back to
+back with NO profit gate — PnL is not the objective, volume is. The bot is
+FLAT between cycles, and the session loss limit (5% of margin, net of fees)
+is what bounds a run.
 
 The v3 maker path is pinned by tests/engine/controllers/test_volume_bot.py.
 """
@@ -127,6 +127,8 @@ def test_session_loss_limit_stops_the_bot_flat():
         assert c.close_base_remaining == 0
         assert c.entry_base - c.sold_base <= 0
 
+    asyncio.run(body())
+
 
 def test_session_loss_limit_disabled_when_zero():
     async def body():
@@ -233,6 +235,8 @@ def test_F1_taker_orders_are_price_bounded_not_naked_market():
         assert sell.order_type is not OrderType.MARKET
         assert sell.price is not None and sell.price > 0
 
+    asyncio.run(body())
+
 
 def test_F4_unsold_inventory_stops_instead_of_buying_on_top():
     """Exhausting sell attempts on a REAL position must end the session, not
@@ -319,3 +323,127 @@ def test_flat_between_cycles_so_nothing_is_exposed_at_the_stop():
         assert c.close_base_remaining == 0
 
     asyncio.run(body())
+
+
+# --------------------------------------------------------------------------
+# TAKER-REST-STALL (found in self-review, 2026-07-31). A marketable LIMIT is
+# NOT an IOC: if the book cannot fill it within the slippage bound the
+# remainder RESTS. Taker mode disables the maker requote/cross rescues, so
+# without a taker-specific timeout the leg sits forever holding a partial
+# position — a stall AND an exposed position.
+# --------------------------------------------------------------------------
+def test_partially_swept_taker_buy_does_not_rest_forever():
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_taker_fill_timeout_seconds=5.0)
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        half = buy.order.amount_base / Decimal(2)
+        # Thin book: only half sweeps, the rest RESTS (order stays OPEN).
+        adapter.fill_order(buy.order.id, amount=half, price=Decimal("100"), partial=True)
+
+        # Before the timeout the leg is legitimately still working.
+        await orch.tick_controller(c.id)
+        assert c.phase == "pending_fill"
+        assert c.sell_id is None
+
+        c.leg_quoted_ts -= 60.0          # timeout elapses
+        await orch.tick_controller(c.id)
+
+        assert c.sell_id is not None, "must stop resting and sell what it holds"
+        assert c.phase == "pending_close_fill"
+        sell = orch.get(c.sell_id)
+        assert sell.order.amount_base == half
+
+    asyncio.run(body())
+
+
+def test_unfilled_taker_buy_reprices_with_taker_geometry():
+    """A taker requote must re-place MARKETABLE, never post a passive maker
+    bid — otherwise the rescue silently converts the strategy to maker."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("20"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_taker_fill_timeout_seconds=5.0)
+        await orch.spawn_controller(c)
+        first = adapter.placed[0]
+        c.leg_quoted_ts -= 60.0          # nothing filled; timeout elapses
+        await orch.tick_controller(c.id)
+
+        assert len(adapter.placed) == 2, "must cancel and re-place"
+        repriced = adapter.placed[-1]
+        assert repriced.order_type is OrderType.LIMIT
+        book = await adapter.order_book(PAIR)
+        assert repriced.price >= book.best_ask, (
+            "a taker re-place must still be marketable (at/through the ask), "
+            f"got {repriced.price} vs ask {book.best_ask}"
+        )
+        assert c.entry_base == 0
+
+    asyncio.run(body())
+
+
+def test_resting_taker_sell_is_repriced_not_left_hanging():
+    """An exit that cannot fully sweep must be re-placed at the fresh bid —
+    leaving it resting leaves the user holding the unsold remainder."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("5"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_taker_fill_timeout_seconds=5.0,
+                target_volume_usd="1000000")
+        await orch.spawn_controller(c)
+        adapter.fill_order(orch.get(c.buy_id).order.id, price=Decimal("100"))
+        await orch.tick_controller(c.id)
+        assert c.phase == "pending_close_fill"
+        first_sell_id = c.sell_id
+        placed_before = len(adapter.placed)
+
+        c.leg_quoted_ts -= 60.0          # the sell rests, timeout elapses
+        await orch.tick_controller(c.id)
+
+        assert len(adapter.placed) > placed_before, "the exit must be re-placed"
+        assert c.sell_id != first_sell_id
+        assert c.entry_base - c.sold_base > 0, "still holding, still working the exit"
+        assert not c.completed
+
+    asyncio.run(body())
+
+
+# --------------------------------------------------------------------------
+# VOL-STOP-RESET (self-review 2026-07-31). The 5%-of-margin stop is enforced
+# against the CONTROLLER's in-memory cumulative PnL. A rebuild (recovery /
+# worker handoff) reset it to 0 and restarted the whole loss budget — and the
+# max_cycles cap with it — so a run could bleed several multiples of the
+# user's stop. Same class of bug DN's restore_* keys already fixed.
+# --------------------------------------------------------------------------
+def test_rebuilt_controller_resumes_the_loss_budget():
+    adapter = SpreadAdapter(mid=Decimal(100), auto_fill_market=False)
+    c = _vb(
+        adapter, ExecutorOrchestrator(),
+        vol_session_loss_limit_usd="5",
+        restore_session_realized_pnl_usd=-4.80,
+        restore_cycles_completed=37,
+        restore_session_volume_usd=7400.0,
+    )
+    assert c.session_realized_pnl_usd == Decimal("-4.80"), "must resume, not restart"
+    assert c.cycles_completed == 37
+    assert c.session_volume_usd == Decimal("7400.0")
+    # Still inside the budget...
+    assert c._session_loss_breached() is False
+    # ...and one more losing cycle trips it, instead of getting a fresh $5.
+    c.session_realized_pnl_usd = Decimal("-5.01")
+    assert c._session_loss_breached() is True
+
+
+def test_fresh_controller_starts_from_zero():
+    """A new run must never inherit a prior run's counters (the runs>0 guard in
+    run_engine_cycle is what enforces this upstream)."""
+    adapter = SpreadAdapter(mid=Decimal(100), auto_fill_market=False)
+    c = _vb(adapter, ExecutorOrchestrator(), vol_session_loss_limit_usd="5")
+    assert c.session_realized_pnl_usd == Decimal(0)
+    assert c.cycles_completed == 0
+    assert c.session_volume_usd == Decimal(0)

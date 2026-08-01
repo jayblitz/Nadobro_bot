@@ -219,6 +219,9 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "vol_taker_mode": 1.0,
         # Price bound on the marketable-limit taker legs.
         "vol_taker_slippage_bp": 15.0,
+        # A marketable limit rests if it cannot fully sweep; cancel + re-place
+        # a taker leg still live after this long.
+        "vol_taker_fill_timeout_seconds": 10.0,
     },
     "bro": {
         "budget_usd": 500.0,

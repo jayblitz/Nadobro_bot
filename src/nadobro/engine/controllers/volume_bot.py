@@ -132,6 +132,16 @@ class VolumeBotController(Controller):
         self.session_loss_limit_usd = _non_negative_decimal(
             self.cfg("vol_session_loss_limit_usd", 0)
         )
+        # TAKER-REST-STALL (2026-07-31): a marketable LIMIT is not an IOC. If
+        # the book has less size than our order within the slippage bound, the
+        # remainder RESTS instead of cancelling — and taker mode disables the
+        # maker requote/cross rescues, so the leg would sit forever holding a
+        # partial position. Any taker leg still live after this long is
+        # cancelled and re-placed at the fresh touch (a partially filled buy
+        # flips straight to selling what it actually got). 0 disables.
+        self.taker_fill_timeout_seconds = float(
+            self.cfg("vol_taker_fill_timeout_seconds", 10.0) or 0.0
+        )
         # AUDIT-VOL-2026-07-31 F1: "taker" is executed as a MARKETABLE LIMIT,
         # not a naked MARKET. NadoClient.place_market_order is an IOC priced
         # +/-slippage_pct through the touch (default 1%) and the adapter never
@@ -147,9 +157,18 @@ class VolumeBotController(Controller):
         # user holding base the bot opened.
         self._emergency_exit_reason = ""
 
-        self.session_volume_usd: Decimal = Decimal(0)
-        self.session_realized_pnl_usd: Decimal = Decimal(0)
-        self.cycles_completed = 0
+        # Cumulative session progress. RESTORED on a rebuild (recovery / worker
+        # handoff) from the state the worker persists each cycle — otherwise a
+        # rebuild would zero the loss counter and restart the user's 5% stop
+        # budget (and the max_cycles cap) mid-run. See VOL-STOP-RESET in
+        # engine_runtime.run_engine_cycle; same pattern as DN's restore_*.
+        self.session_volume_usd: Decimal = _non_negative_decimal(
+            self.cfg("restore_session_volume_usd", 0)
+        )
+        self.session_realized_pnl_usd: Decimal = _dec(
+            self.cfg("restore_session_realized_pnl_usd", 0) or 0
+        )
+        self.cycles_completed = max(0, int(_dec(self.cfg("restore_cycles_completed", 0) or 0)))
         self.completed = False
         self.stop_reason = ""
         self.phase = "idle"
@@ -431,6 +450,12 @@ class VolumeBotController(Controller):
             self.phase = "filled_wait_close"
             await self._start_sell_cycle()
             return True
+        if self.taker_mode:
+            # Re-place with TAKER geometry (marketable through the ask), not
+            # the maker join below — otherwise a taker requote would silently
+            # post a passive maker bid. Nothing filled, so the per-cycle reset
+            # inside _start_buy_cycle is a no-op.
+            return await self._start_buy_cycle()
         touch = await self._touch()
         if touch is None:
             self._enter_market_closed()
@@ -777,9 +802,8 @@ class VolumeBotController(Controller):
                     self._sync_buy_progress(buy_ex)
                 leg_age = now - self.leg_started_ts if self.leg_started_ts else 0.0
                 quote_age = now - self.leg_quoted_ts if self.leg_quoted_ts else 0.0
-                # Requote/cross are MAKER mechanics: they exist to rescue a
-                # resting quote. A market order has no resting state to
-                # rescue, so they must never fire in taker mode.
+                # Cross-on-deadline is a MAKER mechanic (we are already
+                # crossing in taker mode), so it stays off here.
                 if (
                     not self.taker_mode
                     and self.cross_after_seconds > 0
@@ -787,6 +811,17 @@ class VolumeBotController(Controller):
                     and leg_age >= self.cross_after_seconds
                 ):
                     await self._cross_leg(buy_ex, TradeType.BUY)
+                    return
+                # TAKER-REST-STALL: a marketable limit that could not fully
+                # sweep RESTS. Without this the leg would sit forever holding
+                # a partial fill, with both maker rescues disabled.
+                if (
+                    self.taker_mode
+                    and self.taker_fill_timeout_seconds > 0
+                    and quote_age >= self.taker_fill_timeout_seconds
+                    and self.requotes < self._MAX_REQUOTES_PER_CYCLE
+                ):
+                    await self._requote_buy(buy_ex)
                     return
                 if (
                     not self.taker_mode
@@ -856,7 +891,7 @@ class VolumeBotController(Controller):
                 leg_age = now - self.leg_started_ts if self.leg_started_ts else 0.0
                 quote_age = now - self.leg_quoted_ts if self.leg_quoted_ts else 0.0
                 was_cross = self.last_order_kind == "sell_cross"
-                # Maker-only rescue mechanics (see the buy leg above).
+                # Maker-only rescue mechanic (see the buy leg above).
                 if (
                     not self.taker_mode
                     and self.cross_after_seconds > 0
@@ -864,6 +899,17 @@ class VolumeBotController(Controller):
                     and leg_age >= self.cross_after_seconds
                 ):
                     await self._cross_leg(sell_ex, TradeType.SELL)
+                    return
+                # TAKER-REST-STALL: a sell that could not fully sweep RESTS,
+                # leaving the user holding the unsold remainder. Re-place it at
+                # the fresh bid — an exit must never be left to linger.
+                if (
+                    self.taker_mode
+                    and self.taker_fill_timeout_seconds > 0
+                    and quote_age >= self.taker_fill_timeout_seconds
+                    and self.requotes < self._MAX_REQUOTES_PER_CYCLE
+                ):
+                    await self._requote_sell(sell_ex)
                     return
                 if (
                     not self.taker_mode

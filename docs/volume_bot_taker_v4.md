@@ -109,6 +109,21 @@ could fill up to 99 bp away from the book and overspend the risk-approved
 cycle size (audit 2026-07-31, F1). This is an execution-safety bound, not a
 profit gate.
 
+**One deliberate exception.** `engine/adapter/nado.py` converts a reduce-only
+order to MARKET when its notional is under the venue minimum: a resting limit
+that small can never fill, so crossing is the only way out. A sub-minimum sell
+remainder therefore exits as a 1%-bounded IOC rather than a 15 bp limit. That
+is the right trade — stranding the position is strictly worse than a bounded
+dust exit — but it means "every leg is 15 bp bounded" is true for full-size
+legs only.
+
+**A marketable limit is not an IOC.** If the book cannot fill it inside the
+bound, the remainder RESTS. Taker mode disables the maker requote/cross
+rescues, so a taker leg still live after `vol_taker_fill_timeout_seconds`
+(10 s) is cancelled and re-placed — a partially filled buy flips straight to
+selling what it actually got. Without that, a thin book stalls the run
+holding a partial position (found in self-review, TAKER-REST-STALL).
+
 ## Fee model
 
 ### Volume accounting — both legs count
