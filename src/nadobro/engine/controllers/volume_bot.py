@@ -151,6 +151,12 @@ class VolumeBotController(Controller):
         # and how much of the leg may be crossed in total.
         self.cross_tolerance_frac = _dec(self.cfg("vol_cross_tolerance_frac", "0.5"))
         self.max_taker_frac = _dec(self.cfg("vol_max_taker_frac", "0.25"))
+        # Hard deadline as a multiple of the horizon. Past it a maker leg
+        # crosses regardless of schedule debt or taker budget — the valve that
+        # makes "patient" bounded rather than indefinite. 0 disables (unwise).
+        self.leg_hard_deadline_mult = float(
+            self.cfg("vol_leg_hard_deadline_mult", 3.0) or 0.0
+        )
         # Chase cadence: how long a resting child may sit before it is
         # cancelled and re-posted at the fresh touch.
         self.chase_interval_seconds = float(
@@ -295,6 +301,25 @@ class VolumeBotController(Controller):
         if self.taker_mode or total_quote <= 0:
             return False
         elapsed = (time.time() - self.leg_started_ts) if self.leg_started_ts else 0.0
+        # SAFETY VALVE (self-review 2026-07-31): patience must have a hard end.
+        # Schedule debt alone cannot rescue a leg that is PARTIALLY filled —
+        # e.g. 60% done leaves 40% of debt, under the 50% tolerance, so it
+        # never escalates; once the chase budget is also spent the leg rests
+        # forever and the cycle never completes. That is precisely the v3
+        # stall this work exists to remove, and it is reachable with
+        # vol_chase_interval_seconds=0 even without exhausting chases.
+        #
+        # This valve deliberately BYPASSES the taker budget: a leg that can
+        # never complete is worse than paying the fee, the same reasoning that
+        # lets the v4.1 emergency exit price through the loss floor.
+        if self._leg_patience_exhausted(elapsed):
+            logger.info(
+                "volume_bot: patience exhausted on the %s leg (elapsed %.0fs, "
+                "chases %s) — crossing to finish it pair=%s controller=%s",
+                "sell" if self.phase == "pending_close_fill" else "buy",
+                elapsed, self.requotes, self.trading_pair, self.id,
+            )
+            return True
         return should_cross(
             total_quote,
             filled_quote=filled_quote,
@@ -304,6 +329,19 @@ class VolumeBotController(Controller):
             crossed_quote=self.crossed_quote,
             max_taker_frac=self.max_taker_frac,
         )
+
+    def _leg_patience_exhausted(self, elapsed: float) -> bool:
+        """Has the maker leg run out of passive options?
+
+        Either we have spent the per-cycle chase budget, or the leg has been
+        working for a hard multiple of its horizon. Both mean "resting is not
+        going to finish this", independently of how far behind schedule the
+        arithmetic says we are.
+        """
+        if self.requotes >= self._MAX_REQUOTES_PER_CYCLE:
+            return True
+        hard_deadline = self.twap_horizon_seconds * self.leg_hard_deadline_mult
+        return hard_deadline > 0 and elapsed >= hard_deadline
 
     def _sell_leg_notional(self) -> Decimal:
         """Quote notional the sell leg is unwinding (what the buy actually

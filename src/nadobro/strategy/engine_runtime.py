@@ -1052,6 +1052,10 @@ def map_strategy_config(
             "vol_chase_interval_seconds": _f(settings, "vol_chase_interval_seconds", 20.0),
             "vol_cross_tolerance_frac": _f(settings, "vol_cross_tolerance_frac", 0.5),
             "vol_max_taker_frac": _f(settings, "vol_max_taker_frac", 0.25),
+            # Hard deadline (x horizon) after which a maker leg crosses no
+            # matter what. Without it a PARTIALLY filled leg can sit under the
+            # debt tolerance forever once chases are spent — the v3 stall.
+            "vol_leg_hard_deadline_mult": _f(settings, "vol_leg_hard_deadline_mult", 3.0),
             # A marketable limit RESTS if it cannot fully sweep, and taker mode
             # disables the maker rescues — so a taker leg still live after this
             # long is cancelled and re-placed (TAKER-REST-STALL).

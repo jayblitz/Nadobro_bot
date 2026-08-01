@@ -226,6 +226,7 @@ SETTINGS_STRATEGY_DEFAULTS: Mapping[str, dict] = {
         "vol_chase_interval_seconds": 20.0,
         "vol_cross_tolerance_frac": 0.5,
         "vol_max_taker_frac": 0.25,
+        "vol_leg_hard_deadline_mult": 3.0,
         # Price bound on the marketable-limit taker legs.
         "vol_taker_slippage_bp": 15.0,
         # A marketable limit rests if it cannot fully sweep; cancel + re-place

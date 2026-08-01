@@ -222,3 +222,133 @@ def test_taker_algo_is_still_reachable_as_the_kill_switch():
     assert c.taker_mode is True and c.execution_algo == "taker"
     legacy = _vb(adapter, ExecutorOrchestrator(), vol_taker_mode=1)
     assert legacy.taker_mode is True, "the legacy kill-switch still forces taker"
+
+
+# --------------------------------------------------------------------------
+# MAKER-LEG-STALL (self-review 2026-07-31). Schedule debt alone cannot rescue
+# a PARTIALLY filled leg: at 60% done the remaining 40% of debt sits under the
+# 50% tolerance, so it never escalates. Once the chase budget is also spent the
+# leg rests forever and the cycle never completes — the exact v3 stall this
+# whole line of work exists to remove. Patience needs a hard end.
+# --------------------------------------------------------------------------
+def test_partially_filled_maker_leg_cannot_rest_forever():
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_twap_horizon_seconds=60.0,
+                vol_chase_interval_seconds=5.0)
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        # 60% filled -> debt 40 < tolerance 50, so debt can never escalate it.
+        adapter.fill_order(buy.order.id, amount=buy.order.amount_base * Decimal("0.6"),
+                           price=buy.order.price, partial=True)
+        c.requotes = c._MAX_REQUOTES_PER_CYCLE      # chase budget spent
+        c.leg_started_ts -= 10_000                  # far past the hard deadline
+
+        await orch.tick_controller(c.id)
+        assert c.crosses == 1, "patience must have a hard end"
+
+    asyncio.run(body())
+
+
+def test_hard_deadline_rescues_even_with_chasing_disabled():
+    """With vol_chase_interval_seconds=0 the chase budget never depletes, so
+    the deadline is the ONLY thing that can finish a stuck maker leg."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_twap_horizon_seconds=60.0,
+                vol_chase_interval_seconds=0, vol_leg_hard_deadline_mult=3.0)
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, amount=buy.order.amount_base * Decimal("0.6"),
+                           price=buy.order.price, partial=True)
+        assert c.requotes == 0, "precondition: chasing is off, budget untouched"
+
+        c.leg_started_ts -= 100.0        # inside 3x horizon (180s) -> still patient
+        await orch.tick_controller(c.id)
+        assert c.crosses == 0
+
+        c.leg_started_ts -= 200.0        # now past 3x horizon
+        await orch.tick_controller(c.id)
+        assert c.crosses == 1, "the hard deadline must finish it"
+
+    asyncio.run(body())
+
+
+def test_safety_valve_overrides_the_taker_budget():
+    """The taker budget bounds ECONOMIC crossing. It must not be able to cause
+    a permanent stall — an un-completable leg is worse than the fee, the same
+    reasoning that lets the v4.1 emergency exit price through the loss floor."""
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_twap_horizon_seconds=60.0,
+                vol_chase_interval_seconds=5.0)
+        await orch.spawn_controller(c)
+        c.crossed_quote = Decimal("999")            # budget fully spent
+        c.requotes = c._MAX_REQUOTES_PER_CYCLE
+        c.leg_started_ts -= 10_000
+        await orch.tick_controller(c.id)
+        assert c.crosses == 1, "the valve must bypass the taker budget"
+
+    asyncio.run(body())
+
+
+# --------------------------------------------------------------------------
+# The v4.1 safety work was all pinned in TAKER mode, but maker TWAP is now the
+# shipped default. These re-assert the money-critical invariants on the path
+# users actually get.
+# --------------------------------------------------------------------------
+def test_session_loss_stop_fires_on_the_maker_default_path():
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), spread_bp=Decimal("20"),
+                                auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, vol_session_loss_limit_usd="5",
+                vol_chase_interval_seconds=0, vol_twap_horizon_seconds=600.0)
+        assert c.execution_algo == "twap", "precondition: the shipped default"
+
+        await orch.spawn_controller(c)
+        for _ in range(400):
+            if c.completed:
+                break
+            for attr in ("buy_id", "sell_id"):
+                oid = getattr(c, attr)
+                ex = orch.get(oid) if oid else None
+                if ex is None or ex.is_terminated:
+                    continue
+                px = (ex.order.price if attr == "buy_id"
+                      else ex.order.price * Decimal("0.995"))   # a real loss
+                adapter.fill_order(ex.order.id, price=px)
+                await orch.tick_controller(c.id)
+
+        assert c.stop_reason == "session_loss_limit"
+        assert c.session_realized_pnl_usd <= Decimal("-5")
+        assert c.entry_base - c.sold_base == 0, "must stop FLAT"
+
+    asyncio.run(body())
+
+
+def test_maker_default_stops_flat_so_the_sweep_takes_nothing():
+    """A flat bot must authorise no sweep — otherwise min(wallet, cap) reaches
+    the user's own pre-existing spot."""
+    from src.nadobro.strategy.strategy_lifecycle import _volume_spot_managed_size
+
+    async def body():
+        adapter = SpreadAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch = ExecutorOrchestrator()
+        c = _vb(adapter, orch, target_volume_usd="0",
+                vol_chase_interval_seconds=0, vol_twap_horizon_seconds=600.0)
+        await orch.spawn_controller(c)
+        buy = orch.get(c.buy_id)
+        adapter.fill_order(buy.order.id, price=buy.order.price)
+        await orch.tick_controller(c.id)
+        sell = orch.get(c.sell_id)
+        adapter.fill_order(sell.order.id, price=sell.order.price)
+        await orch.tick_controller(c.id)
+
+        assert c.entry_base - c.sold_base == 0
+        assert _volume_spot_managed_size(dict(c.volume_metrics())) == 0.0
+
+    asyncio.run(body())

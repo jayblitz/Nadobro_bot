@@ -307,6 +307,17 @@ sizes there is nothing for slicing to buy. `plan_slices` exists and is tested
 so the pacing is ready if sizes ever grow, but the controller places one order
 per leg today. The schedule governs *patience*, not slice count.
 
+**Patience has a hard end.** Schedule debt alone cannot rescue a PARTIALLY
+filled leg: at 60% done the remaining 40% of debt sits under the 50% tolerance,
+so it never escalates — and once the chase budget is spent the leg rests
+forever and the cycle never completes (found in self-review; it is the v3 stall
+in a new costume, and reachable with `vol_chase_interval_seconds=0` even
+without exhausting chases). A maker leg therefore also crosses when either the
+chase budget is spent or it has worked for `vol_leg_hard_deadline_mult` x the
+horizon (3x). That valve deliberately **bypasses the taker budget** — an
+un-completable leg is worse than the fee, the same reasoning that lets the
+v4.1 emergency exit price through the loss floor.
+
 **Simulated against the measured book** (5.7 bp spread, maker 1.8 bp, taker
 4.3 bp, $100 clip, idealised fills):
 
