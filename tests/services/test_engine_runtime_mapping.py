@@ -105,9 +105,11 @@ def test_map_mid_config():
     )
     assert cfg["spread_bid_pct"] == Decimal("0.0005")
     assert cfg["spread_ask_pct"] == Decimal("0.0005")
-    # Mid is one bid + one ask: full deployed notional per side (levels do NOT
-    # subdivide the quote). $100 margin × 1x = $100.
+    # order_amount_quote is the notional deployed per SIDE ($100 margin × 1x).
+    # The ladder subdivides it across ``levels`` — the total is the same either
+    # way, so this number does not move when levels change.
     assert cfg["order_amount_quote"] == Decimal("100")
+    assert cfg["ladder_levels"] == 2
     assert cfg["max_base_quote"] == Decimal("60")
 
 
@@ -847,7 +849,14 @@ def test_apply_live_fill_anchored_grid_refreshes_mm_quotes_and_risk_limits():
         )
     )
 
-    assert controller.order_amount_quote == Decimal("50")
+    # LADDER (2026-08-02): order_amount_quote is now the notional deployed per
+    # SIDE, subdivided across ``levels`` levels — it used to be the size of the
+    # single order fill-anchored rested. With deployed=$100 and levels=2 the
+    # per-level size is still $50; what changed is that BOTH levels now rest,
+    # instead of one order sitting alone while the rest of the budget idled.
+    assert controller.order_amount_quote == Decimal("100")
+    assert controller.ladder_levels == 2
+    assert controller.order_amount_quote / controller.ladder_levels == Decimal("50")
     assert controller.spread_bid_pct == Decimal("0.002")
     assert controller.reset_threshold_pct == Decimal("0.005")
     assert orch.risk.limits.max_single_order_quote == Decimal("100.0")
@@ -1002,3 +1011,56 @@ def test_vol_registry_default_sl_is_5_pct():
     from src.nadobro.strategy.strategy_registry import settings_strategy_defaults
 
     assert float(settings_strategy_defaults()["vol"]["sl_pct"]) == 5.0
+
+# ==========================================================================
+# Ladder mapping (Phase 2, 2026-08-02)
+# ==========================================================================
+def test_mid_resurrects_the_levels_input_without_changing_deployment():
+    """``levels`` used to be read and thrown away for Mid ("Mid is a single bid
+    + single ask"). It now shapes the book — but the per-side TOTAL is
+    unchanged, which is what makes turning it on risk-neutral."""
+    settings = {"notional_usd": 1000.0, "levels": 4}
+    cfg = er.map_strategy_config("mid", settings, Decimal("1000"), product="BTC-PERP", leverage=1)
+    assert cfg["ladder_levels"] == 4
+    assert cfg["order_amount_quote"] == Decimal("1000")     # side total, unchanged
+    one = er.map_strategy_config(
+        "mid", {"notional_usd": 1000.0, "levels": 1}, Decimal("1000"),
+        product="BTC-PERP", leverage=1,
+    )
+    assert one["order_amount_quote"] == cfg["order_amount_quote"]
+    assert one["ladder_levels"] == 1
+
+
+def test_rgrid_momentum_is_excluded_from_the_ladder():
+    """rgrid fires ONE taker per break rather than resting a ladder. Handing it
+    the full side deployment would multiply its step size by ``levels``."""
+    settings = {"notional_usd": 1000.0, "levels": 4, "fill_anchored": 1}
+    rg = er.map_strategy_config("rgrid", settings, Decimal("1000"), product="BTC-PERP", leverage=1)
+    assert rg["momentum"] is True
+    assert rg["ladder_levels"] == 1, "rgrid must not ladder"
+    assert rg["order_amount_quote"] == Decimal("250"), "per-step taker size changed"
+
+    gr = er.map_strategy_config("grid", settings, Decimal("1000"), product="BTC-PERP", leverage=1)
+    assert gr["momentum"] is False
+    assert gr["ladder_levels"] == 4
+    assert gr["order_amount_quote"] == Decimal("1000")
+
+
+def test_min_quote_lifetime_tracks_the_actual_cadence():
+    """Derived from the strategy's real cadence (~2 cycles), not a constant, and
+    capped so a slow strategy doesn't inherit a multi-minute hold."""
+    mid = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "interval_seconds": 8}, Decimal("100"),
+        product="BTC-PERP", leverage=1,
+    )
+    assert mid["min_quote_lifetime_s"] == Decimal("16")
+    slow = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "interval_seconds": 600, "fill_anchored": 1},
+        Decimal("100"), product="BTC-PERP", leverage=1,
+    )
+    assert slow["min_quote_lifetime_s"] == Decimal("30"), "cap not applied"
+    explicit = er.map_strategy_config(
+        "mid", {"notional_usd": 100.0, "min_quote_lifetime_s": 5}, Decimal("100"),
+        product="BTC-PERP", leverage=1,
+    )
+    assert explicit["min_quote_lifetime_s"] == Decimal("5"), "explicit setting ignored"

@@ -419,13 +419,20 @@ def _apply_mid_controller_config(controller: Controller, configs: Dict[str, obje
     controller.spread_floor_half_pct = _dec(configs.get("spread_floor_half_pct", "0.00015"))  # type: ignore[attr-defined]
     controller.spread_cap_half_pct = _dec(configs.get("spread_cap_half_pct", "0.005"))  # type: ignore[attr-defined]
     # Live edits to Mid Mode directional bias take effect on the next tick.
-    from src.nadobro.engine.controllers.market_making import _safe_bias
+    from src.nadobro.engine.controllers.market_making import _safe_bias, _safe_levels
     controller.directional_bias = _safe_bias(configs.get("directional_bias", "0"))  # type: ignore[attr-defined]
     # AUDIT-MM-2026-07-14 #5: Turbo tapped on a RUNNING mid must apply touch
     # quoting too — quote_mode was cached at __init__ only, so the live-apply
     # path delivered a half-applied preset (10x sizing at mid±spread pricing)
     # until a full stop/start.
     controller.quote_mode = str(configs.get("quote_mode", "mid") or "mid").lower()  # type: ignore[attr-defined]
+    # Ladder + queue-preservation knobs are read at __init__ too; refresh them so
+    # a live edit of levels/curve/spacing actually reaches the next tick instead
+    # of silently no-opping until a full stop/start.
+    controller.ladder_levels = _safe_levels(configs.get("ladder_levels", 1))  # type: ignore[attr-defined]
+    controller.ladder_step_bp = _dec(configs.get("ladder_step_bp", "0") or "0")  # type: ignore[attr-defined]
+    controller.ladder_curve = str(configs.get("ladder_curve", "flat") or "flat").lower()  # type: ignore[attr-defined]
+    controller.min_quote_lifetime_s = float(_dec(configs.get("min_quote_lifetime_s", "0") or "0"))  # type: ignore[attr-defined]
 
 
 def _apply_orchestrator_risk_limits(orch: ExecutorOrchestrator, limits: RiskLimits) -> None:
@@ -446,6 +453,12 @@ def _apply_orchestrator_risk_limits(orch: ExecutorOrchestrator, limits: RiskLimi
 
 async def _reset_mm_quotes(controller: Controller, orch: ExecutorOrchestrator) -> None:
     """Forget/stop current MM-style quotes so the next tick uses new sizing."""
+    # Ladder-aware path: walking only the level-0 attributes below would strand
+    # levels 1..N as orphan resting orders on every live re-size.
+    stop_all = getattr(controller, "stop_all_quotes", None)
+    if callable(stop_all):
+        await stop_all()
+        return
     for attr_id, attr_price in (("_bid_id", "_bid_price"), ("_ask_id", "_ask_price")):
         ex_id = getattr(controller, attr_id, None)
         if ex_id is not None:
@@ -717,6 +730,31 @@ def resolve_vol_fee_rates(product: str, network: str = "mainnet") -> tuple[float
     return float(taker), builder
 
 
+# Cap on the auto-derived minimum quote lifetime. Grid's 60s cadence would
+# otherwise derive a 120s hold, which is long enough to be its own stale-quote
+# problem; the churn this guards against only exists on fast cadences.
+_MAX_AUTO_QUOTE_LIFETIME_S = 30.0
+
+
+def _min_quote_lifetime_s(strategy: str, settings) -> Decimal:
+    """Minimum time a maker quote rests before a price change may cancel it.
+
+    Derived from the strategy's ACTUAL cadence (~2 cycles) rather than a
+    hand-picked constant, so it stays correct if the cadence changes. An
+    explicit ``min_quote_lifetime_s`` in settings wins.
+    """
+    explicit = settings.get("min_quote_lifetime_s")
+    if explicit is not None:
+        try:
+            return max(Decimal(0), Decimal(str(explicit)))
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(malformed -> derive it)
+            pass
+    from src.nadobro.core.cadence import effective_interval_seconds
+
+    cadence = effective_interval_seconds(strategy, settings.get("interval_seconds", 60))
+    return Decimal(str(min(_MAX_AUTO_QUOTE_LIFETIME_S, 2.0 * cadence)))
+
+
 def _quote_defense_defaults(settings, notional, *, auto_spread: bool) -> dict:
     """Regime gate / inventory cap / ATR-spread knobs for grid family + MM.
 
@@ -850,11 +888,37 @@ def map_strategy_config(
             # per-side spreads (documented ±0.2 alpha-tilt) to lean the book
             # long/short. _f coerces the legacy text default ("neutral") to 0.0.
             "directional_bias": _mid_bias,
-            # Mid is a single bid + single ask (NOT a ladder), so the full
-            # deployed notional goes into each side — ``levels`` does not subdivide
-            # the quote here (it would just silently shrink the size). With a
-            # participation preset, the per-cycle chunk replaces the full size.
+            # Notional deployed per SIDE. ``ladder_levels`` below subdivides it
+            # across levels — the total is identical either way, so resurrecting
+            # the (previously dead) ``levels`` input changes the SHAPE of the
+            # book, never its size. With a participation preset, the per-cycle
+            # chunk replaces the full size.
             "order_amount_quote": _chunk_dec or Decimal(str(deployed)),
+            # LADDER (Phase 2, 2026-08-02): Mid used to place ONE bid + ONE ask
+            # and then wait in position — ``levels`` was read here and thrown
+            # away. Now the side's deployment is split across ``levels`` levels
+            # stepping away from the target, so the book scales into an adverse
+            # move and back out of it. Each level is clamped to the venue
+            # min-notional by the planner, and levels=1 reproduces the old
+            # single-quote behaviour exactly.
+            "ladder_levels": levels,
+            # Step per level. Touch mode glues to a one-tick book where a
+            # spread-sized step would be nonsense, so it takes the planner's
+            # auto spacing (one tick, floored at 1bp); mid mode steps by the
+            # quoted spread, matching how the classic grid ladder spaces levels.
+            "ladder_step_bp": (
+                Decimal(0)
+                if str(settings.get("mm_quote_mode") or "mid").lower() == "touch"
+                else spread_frac * Decimal(10000)
+            ),
+            "ladder_curve": str(settings.get("mm_size_curve") or "flat"),
+            # PHASE 0 (queue preservation): Mid runs on an 8s fast cadence, so a
+            # tolerance-driven cancel could bin a quote after 8s of queue time.
+            # On BTC-PERP the spread is a single tick — a quote cannot be
+            # improved, only re-queued at the back — so queue position IS the
+            # fill rate. Hold each quote for ~2 cycles before a mere price
+            # change may cancel it. Safety cancels are never delayed.
+            "min_quote_lifetime_s": _min_quote_lifetime_s(strategy, settings),
             "max_base_quote": Decimal(str(_inv_cap)),
             # Quote mode: "mid" (default, mid ± spread) or "touch" (join the
             # best bid/ask — Turbo Volume). Unknown values fall back to "mid".
@@ -1110,9 +1174,28 @@ def map_strategy_config(
             "reset_threshold_pct": Decimal(str(_reset_pct)) / Decimal(100),
             "spread_bid_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
             "spread_ask_pct": spread_frac if spread_frac > 0 else Decimal("0.001"),
-            # Fill-anchored places ONE bid + ONE ask per cycle; a participation
-            # chunk sizes that order directly, else the deployed budget / levels.
-            "order_amount_quote": _chunk_dec or (Decimal(str(deployed)) / Decimal(levels)),
+            # LADDER (Phase 2, 2026-08-02): fill-anchored used to rest ONE bid +
+            # ONE ask of deployed/levels and then wait in position — it deployed
+            # a FRACTION of the budget the classic grid ladder deploys with the
+            # same settings. Now the full budget is spread across ``levels``
+            # levels stepping away from the anchor, restoring parity with the
+            # classic ladder and giving the strategy something to scale in and
+            # out of. A participation chunk still sizes the side directly.
+            # rgrid is EXCLUDED from the ladder: it runs taker-momentum, firing
+            # ONE market order of order_amount_quote per break. Handing it the
+            # full side deployment would multiply its step size by ``levels``
+            # while never resting a ladder at all, so it keeps the per-step
+            # sizing it has always had.
+            "order_amount_quote": _chunk_dec or (
+                Decimal(str(deployed)) / Decimal(levels) if strategy == "rgrid"
+                else Decimal(str(deployed))
+            ),
+            "ladder_levels": 1 if strategy == "rgrid" else levels,
+            # Step by the quoted spread, so level i sits at the anchor ± (i+1)
+            # spreads — the same geometry as the classic grid ladder.
+            "ladder_step_bp": (spread_frac if spread_frac > 0 else Decimal("0.001")) * Decimal(10000),
+            "ladder_curve": str(settings.get("grid_size_curve") or "flat"),
+            "min_quote_lifetime_s": _min_quote_lifetime_s(strategy, settings),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": int(eff_lev),
             # rgrid → taker-momentum (buy the break up / sell the break down).

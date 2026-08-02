@@ -277,7 +277,13 @@ class FillAnchoredQuotingController(MarketMakingController):
             self._stall_ticks = 0
             self._last_net_base = net_base
             return
-        dust = abs(self.order_amount_quote / mid) * Decimal("0.01") if mid > 0 else Decimal(0)
+        # LADDER: these thresholds mean "one QUOTE's worth", not one side's
+        # worth. order_amount_quote became the per-side deployment when the
+        # ladder landed, so both must divide by the level count — otherwise the
+        # concession safety valve silently needs `levels`x more stuck exposure
+        # before it fires.
+        level_quote = self.order_amount_quote / Decimal(max(1, self.ladder_levels))
+        dust = abs(level_quote / mid) * Decimal("0.01") if mid > 0 else Decimal(0)
         if abs(net_base) < abs(self._last_net_base) - dust:
             self._stall_ticks = 0           # exposure shrinking — the maker leg is filling
         else:
@@ -289,7 +295,7 @@ class FillAnchoredQuotingController(MarketMakingController):
             return
         # Fee-aware gate: only pay a taker fee to unstick MATERIAL exposure
         # (≥ one quote's notional); let the maker leg handle smaller residue.
-        if abs(net_base) * mid < self.order_amount_quote:
+        if abs(net_base) * mid < level_quote:
             return
         await self._fire_concession(net_base, mid)
         self._stall_ticks = 0               # re-arm; fires again next window if still stuck
@@ -370,9 +376,12 @@ class FillAnchoredQuotingController(MarketMakingController):
                 target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + self.spread_ask_pct))
 
         # Forward the same mark used for exposure decisions. The inherited
-        # reconciler projects the next quote against the exposure cap.
-        await self._reconcile(TradeType.BUY, target_bid, allow_buy, mid)
-        await self._reconcile(TradeType.SELL, target_ask, allow_sell, mid)
+        # reconciler projects each quote against the exposure cap. With
+        # ladder_levels > 1 this rests N levels per side stepping away from the
+        # anchor (scaling in/out) instead of the single order that used to sit
+        # there until it filled; the per-side total is unchanged either way.
+        await self._quote_side(TradeType.BUY, target_bid, allow_buy, mid)
+        await self._quote_side(TradeType.SELL, target_ask, allow_sell, mid)
 
         # Step 2 of the stall escalation: if the soft-reset's maker concession
         # can't rebalance, escalate to a bounded reduce-only taker before SL.

@@ -15,13 +15,21 @@ Implemented in Phase 4.
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from src.nadobro.engine.controllers.controller_base import Controller
 from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExecutorConfig
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import ExecutionStrategy, TradeType, _dec
+from src.nadobro.quant.ladder import FLAT, LadderLevel, describe as _describe_ladder, plan_ladder
+
+# Auto ladder spacing when ``ladder_step_bp`` is unset: one venue tick, floored
+# so a very tight book (BTC-PERP's tick is ~0.16bp) doesn't stack every level
+# on effectively the same price.
+_AUTO_LADDER_STEP_FLOOR_BP = Decimal("1")
 
 # Directional bias maps linearly to the documented alpha-tilt: ±1 bias → ±0.2.
 # As a per-side spread skew this means a full long bias quotes the bid at 0.8×
@@ -33,6 +41,15 @@ _BIAS_SKEW_STRENGTH = Decimal("0.2")
 logger = logging.getLogger(__name__)
 
 
+def _safe_levels(value: object) -> int:
+    """Parse a ladder level count. Any unusable value means one level, i.e. the
+    single-quote behaviour that shipped before the ladder existed."""
+    try:
+        return max(1, int(_dec(value)))
+    except Exception:  # noqa: BLE001  # policy: degrade-ok(garbage -> single quote)
+        return 1
+
+
 def _safe_bias(value: object) -> Decimal:
     """Parse directional_bias, clamped to [-1, 1]. Tolerates the legacy text
     default ("neutral") and any unparseable value by treating it as 0 (neutral)."""
@@ -41,6 +58,19 @@ def _safe_bias(value: object) -> Decimal:
     except Exception:  # noqa: BLE001 - "neutral"/None/garbage → neutral
         return Decimal(0)
     return max(Decimal(-1), min(Decimal(1), b))
+
+
+@dataclass
+class _QuoteSlot:
+    """One resting quote at one ladder level.
+
+    ``ex_id is None`` means the slot is empty; slots are kept (not deleted) so
+    the level-0 compatibility properties always have somewhere to write.
+    """
+    ex_id: Optional[str] = None
+    price: Optional[Decimal] = None
+    size_quote: Decimal = Decimal(0)
+    placed_at: float = 0.0
 
 
 class MarketMakingController(Controller):
@@ -81,11 +111,91 @@ class MarketMakingController(Controller):
         # post-only; no taker leg exists (fees + Nado wash-trading policy; the
         # full rationale lives in docs/mm_volume_tuning.md).
         self.quote_mode = str(self.cfg("quote_mode", "mid") or "mid").lower()
-        self._bid_id: Optional[str] = None
-        self._bid_price: Optional[Decimal] = None
-        self._ask_id: Optional[str] = None
-        self._ask_price: Optional[Decimal] = None
+        # --- Phase 2: position scaling ladder -----------------------------
+        # ``order_amount_quote`` is the notional deployed on ONE SIDE. With
+        # ladder_levels=1 that is a single order (the shipped behaviour, bit for
+        # bit); with N it is split across N levels stepping AWAY from the target
+        # so the book scales into an adverse move and back out of it. The total
+        # per side is unchanged either way, which is what bounds the geometric
+        # curve — laddering redistributes deployment, it never adds to it.
+        self.ladder_levels = _safe_levels(self.cfg("ladder_levels", 1))
+        self.ladder_step_bp = _dec(self.cfg("ladder_step_bp", "0") or "0")
+        self.ladder_curve = str(self.cfg("ladder_curve", FLAT) or FLAT).lower()
+        # --- Phase 0: queue preservation ----------------------------------
+        # On a one-tick book a quote cannot be improved, only queued — so queue
+        # position IS the fill rate and every cancel forfeits it. Minimum time a
+        # quote must rest before a mere price change may cancel it (0 = off).
+        # Safety cancels (inventory/exposure/gate) are never delayed by this.
+        self.min_quote_lifetime_s = float(_dec(self.cfg("min_quote_lifetime_s", "0") or "0"))
+        self._touch_bid: Optional[Decimal] = None
+        self._touch_ask: Optional[Decimal] = None
+        self._slots: Dict[Tuple[bool, int], _QuoteSlot] = {}
         self._cap_floor_warned = False
+        self._last_plan_desc: str = ""
+
+    # -- level-0 compatibility -------------------------------------------------
+    # The ladder generalises what used to be two scalar pairs. Level 0 keeps the
+    # original attribute names so live-config resets, dashboards and tests that
+    # read/assign them keep working unchanged.
+    def _slot(self, is_bid: bool, level: int) -> _QuoteSlot:
+        key = (bool(is_bid), int(level))
+        slot = self._slots.get(key)
+        if slot is None:
+            slot = _QuoteSlot()
+            self._slots[key] = slot
+        return slot
+
+    @property
+    def _bid_id(self) -> Optional[str]:
+        return self._slot(True, 0).ex_id
+
+    @_bid_id.setter
+    def _bid_id(self, value: Optional[str]) -> None:
+        self._slot(True, 0).ex_id = value
+
+    @property
+    def _ask_id(self) -> Optional[str]:
+        return self._slot(False, 0).ex_id
+
+    @_ask_id.setter
+    def _ask_id(self, value: Optional[str]) -> None:
+        self._slot(False, 0).ex_id = value
+
+    @property
+    def _bid_price(self) -> Optional[Decimal]:
+        return self._slot(True, 0).price
+
+    @_bid_price.setter
+    def _bid_price(self, value: Optional[Decimal]) -> None:
+        self._slot(True, 0).price = value
+
+    @property
+    def _ask_price(self) -> Optional[Decimal]:
+        return self._slot(False, 0).price
+
+    @_ask_price.setter
+    def _ask_price(self, value: Optional[Decimal]) -> None:
+        self._slot(False, 0).price = value
+
+    def _now(self) -> float:
+        """Monotonic clock, isolated so tests can drive quote ages."""
+        return time.monotonic()
+
+    def live_quote_ids(self) -> List[str]:
+        """Every executor id this controller currently believes is resting."""
+        return [s.ex_id for s in self._slots.values() if s.ex_id is not None]
+
+    async def stop_all_quotes(self) -> None:
+        """Cancel and forget every resting quote across ALL ladder levels.
+
+        Used by the live-config path when sizing changes: with a ladder, walking
+        only the level-0 attributes would strand levels 1..N as orphan orders.
+        """
+        for slot in list(self._slots.values()):
+            if slot.ex_id is not None:
+                await self.orchestrator.stop(slot.ex_id)
+            slot.ex_id = None
+            slot.price = None
 
     async def on_start(self) -> None:
         return None
@@ -105,6 +215,7 @@ class MarketMakingController(Controller):
         improver first). ``book_mid`` rides along so touch mode needs ONE
         market-data call per tick — mid_price() is itself an order_book fetch,
         and fetching both doubled the per-tick hit on the shared IP budget."""
+        self._touch_bid = self._touch_ask = None
         try:
             book = await self.adapter.order_book(self.trading_pair)
             bid, ask = book.best_bid, book.best_ask
@@ -127,6 +238,10 @@ class MarketMakingController(Controller):
             target_ask = ask - tick
         if target_bid >= target_ask:  # one-tick book after improve — join only
             target_bid, target_ask = bid, ask
+        # RAW touch (pre-improve) drives the Phase-0 queue-priority hold: a
+        # resting quote at or better than this is already at the front of the
+        # best price on its side, so re-placing it can only cost queue position.
+        self._touch_bid, self._touch_ask = bid, ask
         return target_bid, target_ask, (bid + ask) / Decimal(2)
 
     def _unrealized(self, mid: Decimal) -> Decimal:
@@ -146,6 +261,7 @@ class MarketMakingController(Controller):
         # provides both the touch targets and the mid (mid_price() is itself an
         # order_book fetch — calling both doubled the per-tick hit on the
         # shared per-IP query budget). Dead/degraded book -> classic mid fetch.
+        self._touch_bid = self._touch_ask = None
         touch = await self._touch_targets() if self.quote_mode == "touch" else None
         mid = touch[2] if touch is not None else await self.adapter.mid_price(self.trading_pair)
         base_value = self._base_value(mid)
@@ -201,11 +317,105 @@ class MarketMakingController(Controller):
         # per-fill edge for fill rate, bounded by the session SL rail.
         if touch is not None:
             target_bid, target_ask = touch[0], touch[1]
-        await self._reconcile(TradeType.BUY, target_bid, allow_buy, mid)
-        await self._reconcile(TradeType.SELL, target_ask, allow_sell, mid)
+        await self._quote_side(TradeType.BUY, target_bid, allow_buy, mid)
+        await self._quote_side(TradeType.SELL, target_ask, allow_sell, mid)
+
+    # -- ladder (Phase 2) ------------------------------------------------------
+    def _effective_step_bp(self, mid: Decimal) -> Decimal:
+        """Spacing between adjacent ladder levels. Unset ⇒ one venue tick,
+        floored so a sub-bp tick doesn't collapse the ladder onto one price."""
+        if self.ladder_step_bp > 0:
+            return self.ladder_step_bp
+        try:
+            tick = self.adapter.tick_size(self.trading_pair)
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(no tick meta -> bp floor)
+            tick = Decimal(0)
+        tick_bp = (tick / mid) * Decimal(10000) if (tick > 0 and mid > 0) else Decimal(0)
+        return max(tick_bp, _AUTO_LADDER_STEP_FLOOR_BP)
+
+    def _plan_side(self, mid: Decimal) -> List[LadderLevel]:
+        """Split this side's deployed notional into levels, clamped so every
+        level clears the venue minimum (a sub-minimum level is simply rejected,
+        which is how the ``levels`` input silently died the first time)."""
+        try:
+            min_notional = self.adapter.min_notional(self.trading_pair)
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(no product meta -> no clamp)
+            min_notional = Decimal(0)
+        return plan_ladder(
+            self.order_amount_quote,
+            levels=self.ladder_levels,
+            step_bp=self._effective_step_bp(mid),
+            first_offset_bp=0,
+            curve=self.ladder_curve,
+            min_notional=min_notional,
+        )
+
+    @staticmethod
+    def _level_price(base_target: Decimal, offset_bp: Decimal, is_bid: bool) -> Decimal:
+        """Step AWAY from the reference: bids deeper (lower), asks higher."""
+        factor = offset_bp / Decimal(10000)
+        return base_target * ((Decimal(1) - factor) if is_bid else (Decimal(1) + factor))
+
+    async def _retire_levels_beyond(self, is_bid: bool, count: int) -> None:
+        """Cancel slots the current plan no longer contains (the level count
+        shrank — smaller deployment, or the min-notional clamp tightened)."""
+        for (slot_is_bid, level), slot in list(self._slots.items()):
+            if slot_is_bid is not is_bid or level < count or slot.ex_id is None:
+                continue
+            await self.orchestrator.stop(slot.ex_id)
+            slot.ex_id = None
+            slot.price = None
+
+    async def _quote_side(
+        self, side: TradeType, base_target: Decimal, allowed: bool, mid: Decimal
+    ) -> None:
+        """Reconcile the whole ladder on one side against ``base_target``."""
+        is_bid = side is TradeType.BUY
+        plan = self._plan_side(mid) if base_target > 0 else []
+        if not plan:
+            # Degenerate deployment/target: fall through to the single-quote path
+            # so behaviour is exactly what it was before the ladder existed.
+            await self._reconcile(side, base_target, allowed, mid)
+            await self._retire_levels_beyond(is_bid, 1)
+            return
+        if len(plan) > 1:
+            desc = f"{side.name} {_describe_ladder(plan)}"
+            if desc != self._last_plan_desc:
+                self._last_plan_desc = desc
+                logger.debug("MM %s ladder: %s", self.trading_pair, desc)
+        for lvl in plan:
+            await self._reconcile(
+                side,
+                self._level_price(base_target, lvl.offset_bp, is_bid),
+                allowed,
+                mid,
+                level=lvl.index,
+                size_quote=lvl.size_quote,
+            )
+        await self._retire_levels_beyond(is_bid, len(plan))
+
+    def _resting_side_notional(self, is_bid: bool, exclude_level: int) -> Decimal:
+        """Notional already resting on this side, EXCLUDING the level being
+        reconciled (that one is about to be replaced, so counting it would
+        double-book it and deadlock the side into never re-quoting).
+
+        A partially filled level is counted at full size while its executor is
+        still live, so the filled part is briefly counted twice — deliberately
+        conservative, it can only under-quote, never over-expose.
+        """
+        total = Decimal(0)
+        for (slot_is_bid, level), slot in self._slots.items():
+            if slot_is_bid is not is_bid or level == exclude_level or slot.ex_id is None:
+                continue
+            ex = self.orchestrator.get(slot.ex_id)
+            if ex is None or ex.is_terminated:
+                continue
+            total += slot.size_quote
+        return total
 
     def _projected_order_within_exposure(
-        self, side: TradeType, mid: Decimal
+        self, side: TradeType, mid: Decimal,
+        order_quote: Optional[Decimal] = None, level: int = 0,
     ) -> bool:
         """Whether another full quote fits the margin-relative exposure cap.
 
@@ -215,6 +425,10 @@ class MarketMakingController(Controller):
         to almost 2x the promised limit. Reducing orders are always allowed,
         even when they cannot bring an already-oversized position below the cap
         in one fill.
+
+        With a ladder the projection is per LEVEL plus whatever is already
+        resting on that side, so N levels cannot each be waved through on the
+        strength of the same headroom.
         """
         if self.inventory is None or mid <= 0:
             return True
@@ -244,14 +458,21 @@ class MarketMakingController(Controller):
             # exposure_allowed_sides). Surface that once so it is never silent.
             self._cap_floor_warned = True
             logger.warning(
-                "MM %s: net-exposure cap $%s < one order ($%s) — floored to the "
-                "order size for quoting; the configured cap applies to FILLED "
-                "inventory (reduce-only) instead",
+                "MM %s: net-exposure cap $%s < one side deployment ($%s) — floored "
+                "to the deployed size for quoting; the configured cap applies to "
+                "FILLED inventory (reduce-only) instead",
                 self.trading_pair, cap_quote, self.order_amount_quote,
             )
+        # The floor stays ONE FULL SIDE DEPLOYMENT (== order_amount_quote, which
+        # the ladder sums to exactly), not one level. Flooring at a single level
+        # would admit L0 and refuse the rest, silently quoting a fraction of the
+        # size the user deployed.
         cap_quote = max(cap_quote, self.order_amount_quote)
         current_quote = self._base_value(mid)
-        delta_quote = self.order_amount_quote if side is TradeType.BUY else -self.order_amount_quote
+        pending = (
+            self.order_amount_quote if order_quote is None else order_quote
+        ) + self._resting_side_notional(side is TradeType.BUY, level)
+        delta_quote = pending if side is TradeType.BUY else -pending
         projected_quote = current_quote + delta_quote
         # Never block an order that reduces absolute exposure. For a worsening
         # order, equality is allowed so a flat Turbo session can place its first
@@ -260,16 +481,20 @@ class MarketMakingController(Controller):
         return not (worsens and abs(projected_quote) > cap_quote)
 
     async def _reconcile(
-        self, side: TradeType, target: Decimal, allowed: bool, mid: Decimal
+        self, side: TradeType, target: Decimal, allowed: bool, mid: Decimal,
+        *, level: int = 0, size_quote: Optional[Decimal] = None,
     ) -> None:
         is_bid = side is TradeType.BUY
-        cur_id = self._bid_id if is_bid else self._ask_id
-        cur_price = self._bid_price if is_bid else self._ask_price
+        order_quote = self.order_amount_quote if size_quote is None else size_quote
+        slot = self._slot(is_bid, level)
+        cur_id, cur_price = slot.ex_id, slot.price
 
         # Include the next order in the exposure decision, not only inventory
         # that has already filled. This also cancels a partially filled resting
         # quote once its remaining direction would breach the cap.
-        allowed = allowed and self._projected_order_within_exposure(side, mid)
+        allowed = allowed and self._projected_order_within_exposure(
+            side, mid, order_quote, level
+        )
 
         # BUG-MM-2 fix: if the recorded quote already terminated (filled or
         # cancelled by the venue), forget it so we don't skip re-spawning a
@@ -277,28 +502,28 @@ class MarketMakingController(Controller):
         if cur_id is not None:
             ex_existing = self.orchestrator.get(cur_id)
             if ex_existing is None or ex_existing.is_terminated:
-                self._set_quote(is_bid, None, None)
+                self._set_quote(is_bid, None, None, level=level)
                 cur_id, cur_price = None, None
 
         if not allowed:
             if cur_id is not None:
                 await self.orchestrator.stop(cur_id)
-                self._set_quote(is_bid, None, None)
+                self._set_quote(is_bid, None, None, level=level)
             return
 
         if cur_id is not None and cur_price is not None:
             ex = self.orchestrator.get(cur_id)
             if ex is not None and not ex.is_terminated:
-                if self._within_tolerance(target, cur_price):
-                    return  # within tolerance — leave the resting quote
+                if self._should_hold(is_bid, target, slot):
+                    return  # leave the resting quote — see _should_hold
                 await self.orchestrator.stop(cur_id)
-                self._set_quote(is_bid, None, None)
+                self._set_quote(is_bid, None, None, level=level)
 
         # BUG-MM-3 fix: guard against ZeroDivisionError when target collapses
         # to 0 (e.g. mid feed returned 0 and spread_*_pct is 1).
-        if target <= 0:
+        if target <= 0 or order_quote <= 0:
             return
-        amount_base = self.order_amount_quote / target
+        amount_base = order_quote / target
         cfg = OrderExecutorConfig(
             self.trading_pair, side, amount_base, ExecutionStrategy.LIMIT_MAKER, price=target
         )
@@ -307,10 +532,67 @@ class MarketMakingController(Controller):
             inventory=self.inventory,
         )
         ok = await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=self.order_amount_quote)
+            ex, ExecutorRequest(order_amount_quote=order_quote)
         )
         if ok:
-            self._set_quote(is_bid, ex.id, target)
+            self._set_quote(is_bid, ex.id, target, level=level, size_quote=order_quote)
+
+    # -- Phase 0: queue preservation -------------------------------------------
+    def _holds_queue_position(self, is_bid: bool, target: Decimal, price: Decimal) -> bool:
+        """Is this resting quote worth keeping purely on queue grounds?
+
+        Two conditions, both required:
+
+        * **Not behind the touch.** The venue BBO includes our own resting
+          order, so being at the best price on our side means we are the touch —
+          first in line. Behind it we simply will not fill, so we must re-quote.
+        * **The new target is not a better price for us.** Backing a bid off to
+          buy cheaper (or an ask up to sell higher) is worth the queue slot; it
+          is also the correct response to the market moving away from us. What
+          this refuses is the opposite trade — paying MORE (or selling for less)
+          while also going to the back of the queue, which is what the
+          improve-by-a-tick rule computes once our own quote becomes the BBO.
+
+        Only answerable with a live book snapshot; mid-mode ticks never fetch
+        one, so this simply does not fire there.
+        """
+        if self._touch_bid is None or self._touch_ask is None:
+            return False
+        if is_bid:
+            behind = price < self._touch_bid
+            target_is_better = target < price      # buy cheaper
+        else:
+            behind = price > self._touch_ask
+            target_is_better = target > price      # sell higher
+        return not behind and not target_is_better
+
+    def _should_hold(self, is_bid: bool, target: Decimal, slot: _QuoteSlot) -> bool:
+        """Leave the resting quote alone?
+
+        Cancel/replace costs the whole queue position, and on a one-tick book
+        (BTC-PERP's spread is a single tick) a quote cannot be improved — only
+        re-queued at the back. So a cancel that lands on the same or a
+        one-tick-different price is a pure loss of fill rate.
+
+        Holding is never a risk increase: a stale quote on the wrong side of the
+        market simply doesn't fill, and one on the right side fills — which is
+        the job. Safety cancels (inventory ceiling, exposure cap, regime gate)
+        run BEFORE this and are never delayed by it.
+        """
+        cur_price = slot.price
+        if cur_price is None or cur_price <= 0:
+            return False
+        if self._within_tolerance(target, cur_price):
+            return True
+        # Front of the queue at a price no worse than the new target.
+        if self._holds_queue_position(is_bid, target, cur_price):
+            return True
+        # Minimum lifetime: bound the churn rate so a fast cadence can't cancel a
+        # quote before it has had any queue time at all.
+        if self.min_quote_lifetime_s > 0 and slot.placed_at > 0:
+            if (self._now() - slot.placed_at) < self.min_quote_lifetime_s:
+                return True
+        return False
 
     def _within_tolerance(self, target: Decimal, cur_price: Decimal) -> bool:
         """Is the resting quote close enough to the new target to leave alone?
@@ -335,8 +617,31 @@ class MarketMakingController(Controller):
                 return abs(target - cur_price) <= tick
         return abs(target - cur_price) / cur_price <= self.price_distance_tolerance
 
-    def _set_quote(self, is_bid: bool, ex_id: Optional[str], price: Optional[Decimal]) -> None:
-        if is_bid:
-            self._bid_id, self._bid_price = ex_id, price
+    def _set_quote(
+        self, is_bid: bool, ex_id: Optional[str], price: Optional[Decimal],
+        *, level: int = 0, size_quote: Optional[Decimal] = None,
+    ) -> None:
+        slot = self._slot(is_bid, level)
+        slot.ex_id, slot.price = ex_id, price
+        if ex_id is None:
+            slot.placed_at = 0.0
+            slot.size_quote = Decimal(0)
         else:
-            self._ask_id, self._ask_price = ex_id, price
+            slot.placed_at = self._now()
+            if size_quote is not None:
+                slot.size_quote = size_quote
+
+    def ladder_metrics(self) -> dict:
+        """Ladder shape + live level occupancy, for /status and tests."""
+        live = {True: 0, False: 0}
+        for (is_bid, _lvl), slot in self._slots.items():
+            if slot.ex_id is not None:
+                live[bool(is_bid)] += 1
+        return {
+            "ladder_levels": self.ladder_levels,
+            "ladder_curve": self.ladder_curve,
+            "ladder_step_bp": float(self.ladder_step_bp),
+            "ladder_live_bids": live[True],
+            "ladder_live_asks": live[False],
+            "min_quote_lifetime_s": self.min_quote_lifetime_s,
+        }
