@@ -76,8 +76,17 @@ def test_size_curve_values_match_the_controller_vocabulary():
 
 def test_size_curve_is_rejected_for_strategies_without_a_ladder():
     """rgrid/dgrid/vol have no ladder; accepting the key there would store a
-    setting that silently does nothing."""
-    assert "size_curve" not in _SOURCE.split("allowed_text = {")[1].split("}")[0] or True
+    setting that silently does nothing.
+
+    SELF-AUDIT 2026-08-03: the first assertion here read
+    ``assert <expr> or True`` — vacuously true, so it verified nothing at all.
+    Both halves of the contract are now asserted for real: the key IS in the
+    text allowlist (or no button works), AND the handler guards it by strategy.
+    """
+    assert '"size_curve": {"flat", "linear", "geometric"}' in _SOURCE, \
+        "size_curve missing from the allowed_text allowlist — every tap is dropped"
+    assert 'field == "size_curve" and strategy_id not in ("grid", "mid")' in _SOURCE, \
+        "no per-strategy guard: a ladderless strategy could store a dead size_curve"
     for sid in ("rgrid", "dgrid", "dn", "vol"):
         assert not _emitted(f"strategy:set_text:{sid}:size_curve:"), sid
 
@@ -140,11 +149,17 @@ def test_live_edit_refreshes_the_ladder_on_a_running_controller():
 # --------------------------------------------------------------------------
 def test_ladder_line_reports_per_level_size_not_the_total():
     """Per-level size is the number the venue minimum acts on, so it is the one
-    that has to be visible when a user raises the level count."""
-    line = sh._ladder_line({"notional_usd": 400.0, "levels": 4, "mm_leverage_override": 1})
-    assert "4" in line and "100" in line, line
-    doubled = sh._ladder_line({"notional_usd": 400.0, "levels": 2, "mm_leverage_override": 1})
-    assert "200" in doubled, doubled
+    that has to be visible when a user raises the level count.
+
+    SELF-AUDIT: ``"4" in line`` was near-tautological (the level count appears
+    anyway). Assert the SIZE arithmetic, and that the total is never printed as
+    if it were the rung size."""
+    four = sh._ladder_line({"notional_usd": 400.0, "levels": 4, "mm_leverage_override": 1})
+    two = sh._ladder_line({"notional_usd": 400.0, "levels": 2, "mm_leverage_override": 1})
+    assert "$100" in four, four            # 400 / 4
+    assert "$200" in two, two              # 400 / 2
+    assert "$400" not in four, f"printed the side TOTAL as the rung size: {four}"
+    assert "Levels: *4*" in four and "Levels: *2*" in two
 
 
 def test_mid_card_no_longer_claims_one_bid_and_one_ask():

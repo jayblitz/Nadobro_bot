@@ -135,3 +135,49 @@ def test_no_reported_minimum_does_not_collapse_the_ladder():
     assert max_levels(1000, 0) == NO_FLOOR_LEVEL_BOUND
     assert max_levels(1000, None) == NO_FLOOR_LEVEL_BOUND
     assert len(plan_ladder(1000, levels=4, step_bp=1, min_notional=0)) == 4
+
+
+# --------------------------------------------------------------------------
+# Property sweep (self-audit 2026-08-03)
+# --------------------------------------------------------------------------
+def test_planner_invariants_hold_across_the_whole_input_space():
+    """Exhaustive sweep of the boundaries. This found a real defect: with a
+    steep curve, a high level count and NO reported venue minimum — which is
+    exactly what ``_plan_side`` falls back to when product metadata is
+    unavailable — the near rungs quantised to ZERO. A zero-size order is either
+    rejected or grown by the venue client into an unbudgeted one."""
+    from src.nadobro.quant.ladder import MAX_LADDER_LEVELS
+
+    violations = []
+    for dep in (0, -5, 1, 100, 1000, 10 ** 9):
+        for lv in (0, -3, 1, 2, 20, 1000):
+            for curve in (FLAT, LINEAR, GEOMETRIC, "nonsense", ""):
+                for mn in (0, 1, 100, 10 ** 6):
+                    plan = plan_ladder(dep, levels=lv, step_bp=1, curve=curve, min_notional=mn)
+                    case = (dep, lv, curve, mn)
+                    if dep <= 0:
+                        if plan:
+                            violations.append((*case, "non-empty plan for non-positive deployment"))
+                        continue
+                    if not plan:
+                        violations.append((*case, "empty plan for positive deployment"))
+                        continue
+                    if ladder_notional(plan) != Decimal(str(dep)):
+                        violations.append((*case, "sizes do not sum to the deployment"))
+                    if any(lv_.size_quote <= 0 for lv_ in plan):
+                        violations.append((*case, "zero/negative rung"))
+                    if any(lv_.offset_bp < 0 for lv_ in plan):
+                        violations.append((*case, "negative offset — a bid above the reference"))
+                    if [lv_.offset_bp for lv_ in plan] != sorted(lv_.offset_bp for lv_ in plan):
+                        violations.append((*case, "offsets not monotonic"))
+                    if len(plan) > MAX_LADDER_LEVELS:
+                        violations.append((*case, f"{len(plan)} rungs exceeds the cap"))
+                    if mn > 0 and len(plan) > 1 and min(l.size_quote for l in plan) < Decimal(str(mn)):
+                        violations.append((*case, "rung below the venue floor"))
+    assert not violations, f"{len(violations)} violation(s), first 5: {violations[:5]}"
+
+
+def test_level_count_is_capped_even_when_the_config_escapes_the_ui_validator():
+    from src.nadobro.quant.ladder import MAX_LADDER_LEVELS
+
+    assert len(plan_ladder(10 ** 9, levels=10_000, step_bp=1, min_notional=0)) == MAX_LADDER_LEVELS

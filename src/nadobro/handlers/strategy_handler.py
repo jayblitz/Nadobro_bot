@@ -1486,7 +1486,7 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
             f"Size \\(per leg\\): {_leg_size_display(leg_size, str(conf.get('product') or ''), network)} · "
             f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* · Cycles: *{escape_md(str(cycles))}*\n"
             f"Hedge drift gate: *{escape_md(f'{drift_pct:.1f}%')}*\n"
-            f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+            f"Auto\\-close on maintenance: *{escape_md(auto_close)}*\n\n"
         )
     return base + extra + "Use presets or set custom values below\\."
 
@@ -1962,7 +1962,7 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             return (
                 "⚙️ *Delta Neutral · Safety*\n\n"
                 f"Hedge drift gate: *{escape_md(f'{drift_pct:.1f}%')}*\n"
-                f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+                f"Auto\\-close on maintenance: *{escape_md(auto_close)}*\n\n"
                 "If the two legs drift apart by more than the gate, both are closed immediately\\."
             )
         return (
@@ -3156,7 +3156,7 @@ def _build_strategy_preview_text(
         f"• Short Leverage: *1x* \\(fixed\\)\n"
         f"• Min hold: *{escape_md(dn_hold_label)}*\n"
         f"• Cycles: *{escape_md(dn_cycles_label)}*\n"
-        f"• Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+        f"• Auto\\-close on maintenance: *{escape_md(auto_close)}*\n\n"
         "ℹ️ *How it works*\n"
         "Buys spot \\+ 1x\\-shorts the same perp, holds for *at least* the min hold, then keeps the "
         "hedge open while funding stays favorable and closes BOTH legs the moment funding flips "

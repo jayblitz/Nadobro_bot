@@ -38,6 +38,17 @@ _GEOMETRIC_RATIO = Decimal("2.0")
 # sentinel so callers keep using plain min() against their requested count.
 NO_FLOOR_LEVEL_BOUND = 1000
 
+# Hard ceiling on rungs per side, matching the UI's own ``levels`` bound. A
+# config that escapes that validator (a stored value, a bad migration) must not
+# be able to ask for hundreds of rungs: the geometric weights are 2**i, so the
+# near rungs underflow to dust long before the count itself becomes a problem.
+MAX_LADDER_LEVELS = 20
+
+# The quantum the sizing loop rounds to. The clamp below measures against the
+# SAME quantum, so "does this rung survive rounding" is answered exactly rather
+# than approximately.
+_SIZE_QUANTUM = Decimal("0.00000001")
+
 
 def _dec(value: object, default: str = "0") -> Decimal:
     try:
@@ -110,7 +121,7 @@ def plan_ladder(
     if deployed <= 0:
         return []
     want = int(_dec(levels, "1") or 1)
-    n = max(1, min(want, max_levels(deployed, min_notional)))
+    n = max(1, min(want, MAX_LADDER_LEVELS, max_levels(deployed, min_notional)))
 
     # LADDER-CURVE-UNDERSIZE (2026-08-03): ``max_levels`` answers "how many
     # EQUAL slices clear the floor". A curve then makes the near rungs much
@@ -120,10 +131,21 @@ def plan_ladder(
     # before signing, so the side quietly deployed more than the user's budget
     # (measured +38% on geometric/8). Step the level count down until the
     # SMALLEST weighted rung clears the floor.
+    #
+    # The ``> 0`` half is a floor-independent backstop (self-audit 2026-08-03):
+    # with no venue minimum reported — which is what ``_plan_side`` falls back
+    # to when product metadata is unavailable — a steep curve quantised the
+    # near rungs to ZERO, and a zero-size order is either rejected or grown by
+    # the venue client into an unbudgeted one.
     floor = _dec(min_notional)
-    if floor > 0:
-        while n > 1 and (deployed * min(_weights(n, curve)) / sum(_weights(n, curve), Decimal(0))) < floor:
-            n -= 1
+    while n > 1:
+        w = _weights(n, curve)
+        smallest = (deployed * min(w) / sum(w, Decimal(0))).quantize(
+            _SIZE_QUANTUM, rounding=ROUND_DOWN
+        )
+        if smallest > 0 and smallest >= floor:
+            break
+        n -= 1
 
     w = _weights(n, curve)
     total_w = sum(w, Decimal(0))
