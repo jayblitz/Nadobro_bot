@@ -1766,16 +1766,31 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 "bounded reduce\\-only concession unsticks a stalled soft reset\\."
             )
         pov_label = str(conf.get("participation_preset") or "OFF").upper()
+        # Grid runs one of TWO controllers and the card must not describe the
+        # wrong one. fill_anchored=0 (the default) is the classic static band;
+        # =1 is the fill-anchored ladder the Levels/Curve controls drive.
+        _fa = bool(float(conf.get("fill_anchored", 0) or 0))
+        _mode_line = (
+            f"Mode: *Fill\\-anchored ladder*\n{_ladder_line(conf)}\n" if _fa
+            else f"Mode: *Classic band* \\({escape_md(str(int(conf.get('levels', 2) or 2)))} levels\\)\n"
+        )
+        _mode_help = (
+            "Quotes step away from the LAST FILL, never buying above the last sell "
+            "or selling below the last buy\\. Levels split the same margin into rungs "
+            "so the book scales in and out of a move — they never add exposure\\."
+            if _fa else
+            "A static ladder centred on mid, rebuilt each cycle\\. Levels set the "
+            "band width\\. Tap *Fill\\-anchored* to anchor on your last fill instead "
+            "and enable per\\-rung sizing\\."
+        )
         return (
             "⚙️ *GRID · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Bias: *{escape_md(g_bias_str)}*\n"
-            f"{_ladder_line(conf)}\n"
+            f"{_mode_line}"
             f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n"
             f"{_mm_sizing_line(conf)}\n\n"
-            "Quotes step away from the LAST FILL, never buying above the last sell or "
-            "selling below the last buy\\. Levels split the same margin into rungs so the "
-            "book scales in and out of a move — they never add exposure\\."
+            f"{_mode_help}"
         )
 
     if strategy == "rgrid":
@@ -2014,6 +2029,15 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Spread 2bp", callback_data="strategy:set:grid:spread_bp:2"),
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:grid:spread_bp:5"),
                     InlineKeyboardButton("Spread 10bp", callback_data="strategy:set:grid:spread_bp:10"),
+                ],
+                # AUDIT-F10: the Levels/Curve controls below drive the
+                # FILL-ANCHORED quoter, which grid could not reach — fill_anchored
+                # defaults to 0 and only rgrid had a toggle, so the buttons and the
+                # card copy described a controller that never ran. Grid gets the
+                # same opt-in rgrid has.
+                [
+                    InlineKeyboardButton("🪜 Fill-anchored (ladder)", callback_data="strategy:set:grid:fill_anchored:1"),
+                    InlineKeyboardButton("📊 Classic band (default)", callback_data="strategy:set:grid:fill_anchored:0"),
                 ],
                 # LADDER: how many rungs the side's margin is split across, and
                 # how size is distributed over them. The same total either way.

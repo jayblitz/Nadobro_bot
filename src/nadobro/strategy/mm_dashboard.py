@@ -1,4 +1,4 @@
-"""Phase 3: Tread-style pre-trade card + live MM status renderer.
+"""Phase 3: pre-trade card + live MM status renderer.
 
 Both renderers share fee / margin / participation math so the pre-trade preview
 and the live ``/mm_status`` dashboard stay numerically consistent. Numbers
@@ -28,7 +28,7 @@ from src.nadobro.quant.mm_quote_math import (
 )
 
 
-# Tread Fi documented per-quote margin multipliers per participation preset.
+# Documented per-quote margin multipliers per participation preset.
 # These multiply the base (notional/leverage) margin requirement and combine
 # with the bias uplift (1 + |bias|×0.20) to give the pre-trade card's required
 # margin per quote.
@@ -38,8 +38,8 @@ PARTICIPATION_MARGIN_MULTIPLIERS = {
     "passive": 0.5,
 }
 
-# Builder fee — Nadobro is hard-coded at 1 bps (vs Tread's 2 bps). The pre-trade
-# card renders the actual locked value rather than mirroring Tread's number.
+# Builder fee — Nadobro is hard-coded at 1 bps. The pre-trade
+# card renders the actual locked value.
 BUILDER_FEE_BPS = float(NADO_BUILDER_FEE_RATE_1_BPS) / 10.0
 
 
@@ -62,7 +62,7 @@ def compute_pretrade_margin_per_quote_usd(
     participation_preset: Optional[str],
     directional_bias,
 ) -> dict:
-    """Tread perp formula:
+    """Perp margin formula:
 
         Required margin per quote = (notional / leverage)
                                   × safety_factor
@@ -109,7 +109,7 @@ def compute_max_loss_usd(
 ) -> float:
     """Margin-denominated SL per the Phase 0 fix.
 
-    ``Max Loss = (SL% / 100) × (Notional / Leverage)``  (Tread perp formula).
+    ``Max Loss = (SL% / 100) × (Notional / Leverage)``  (perp margin formula).
     Returns 0.0 when SL is unset.
     """
     if sl_pct <= 0:
@@ -158,7 +158,7 @@ def build_pretrade_breakdown(
 ) -> dict:
     """One-shot summary used by the pre-trade card and ``/mm_status`` header.
 
-    Pulls in: catalog min_size + maker fee, Tread margin formula, POV pacing,
+    Pulls in: catalog min_size + maker fee, the perp margin formula, POV pacing,
     estimated quote capacity, max loss. All numbers are returned both raw and
     pre-formatted so the renderer just splices them into the card text.
     """
@@ -214,12 +214,20 @@ def build_pretrade_breakdown(
         # Preview the DEPLOYED budget at the bot's REAL cadence — the card used
         # to pass raw margin and let pov_engine invent a 1200s cycle, so it
         # showed "$100 every 1200s" for a bot placing margin x leverage every
-        # 60s. Same inputs as the live path now.
+        # 60s. Same inputs as the live path now, INCLUDING the fast-cadence
+        # resolution: rgrid/mid run at min(configured, 8s), so passing the raw
+        # interval here would put a cadence on the card the bot never runs and
+        # overstate the cycle slice by up to 7.5x.
+        from src.nadobro.core.cadence import effective_interval_seconds
+
         pov_meta = pov_engine.compute_pov_duration(
             notional_usd=float(notional_usd) * max(1.0, float(leverage or 1.0)),
             preset=str(participation_preset),
             pair_24h_volume_usd=float(pair_24h_volume_usd),
-            interval_seconds=conf.get("interval_seconds"),
+            interval_seconds=effective_interval_seconds(
+                str(strategy_id or "").lower().strip(),
+                conf.get("interval_seconds") or 60,
+            ),
         )
 
     # Per-cycle "expected placed notional" for the fee preview. When POV is on

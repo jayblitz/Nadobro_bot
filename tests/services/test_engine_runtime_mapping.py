@@ -164,12 +164,26 @@ def test_participation_chunk_overrides_per_order_size():
         Decimal(100), product="BTC-USDC",
     )
     assert mid["order_amount_quote"] == Decimal("30")
-    for strat in ("grid", "rgrid"):
-        cfg = er.map_strategy_config(
-            strat, {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1, "mm_cycle_notional_usd": 30.0},
-            Decimal(100), product="BTC-USDC",
-        )
-        assert cfg["order_amount_quote"] == Decimal("30"), strat
+    grid = er.map_strategy_config(
+        "grid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1, "mm_cycle_notional_usd": 30.0},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert grid["order_amount_quote"] == Decimal("30")
+    # RGRID-STEP-CLAMP (2026-08-03): rgrid fires ONE taker per break, so
+    # order_amount_quote is a per-trade RISK parameter, not a throughput target.
+    # A participation chunk may only make that step SMALLER. Since the POV floor
+    # is capped at the deployed budget, an unclamped chunk turned a $25 step into
+    # the whole $100 budget — one break at 3.3x the net-exposure cap.
+    rg = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1, "mm_cycle_notional_usd": 30.0},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert rg["order_amount_quote"] == Decimal("25"), "POV must not enlarge the rgrid step"
+    rg_small = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 4, "fill_anchored": 1, "mm_cycle_notional_usd": 10.0},
+        Decimal(100), product="BTC-USDC",
+    )
+    assert rg_small["order_amount_quote"] == Decimal("10"), "POV must still be able to shrink it"
     dg = er.map_strategy_config(
         "dgrid", {"notional_usd": 100.0, "mm_cycle_notional_usd": 30.0},
         Decimal(100), product="BTC-USDC",

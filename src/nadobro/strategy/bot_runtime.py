@@ -2493,8 +2493,17 @@ def _resolve_mm_cycle_notional_usd(
     vol = max(0.0, float(vol_24h_usd or 0.0))
     if not preset or vol <= 0 or deployed <= 0:
         return 0.0
+    # POV-CADENCE (2026-08-03): size against the cadence the bot ACTUALLY runs.
+    # rgrid/mid are fast-cadence (min(configured, 8s)), so sizing off the raw
+    # `interval_seconds` overstated the per-cycle chunk by up to 7.5x — the
+    # participation preset then meant nothing like its nominal rate.
     return pov_engine.cycle_notional_usd(
-        str(preset), vol, state.get("interval_seconds"), deployed,
+        str(preset), vol,
+        effective_interval_seconds(
+            str(state.get("strategy") or "").lower().strip(),
+            state.get("interval_seconds") or 60,
+        ),
+        deployed,
         venue_min_notional_usd=float(min_notional_usd or 0.0),
     )
 

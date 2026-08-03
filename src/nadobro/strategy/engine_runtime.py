@@ -1188,9 +1188,15 @@ def map_strategy_config(
             # full side deployment would multiply its step size by ``levels``
             # while never resting a ladder at all, so it keeps the per-step
             # sizing it has always had.
-            "order_amount_quote": _chunk_dec or (
-                Decimal(str(deployed)) / Decimal(levels) if strategy == "rgrid"
-                else Decimal(str(deployed))
+            # rgrid fires ONE taker of this size per break, so its step stays
+            # deployed/levels. A POV chunk may only make that step SMALLER:
+            # the $1000 throughput floor is capped at the deployed budget, so
+            # an unclamped chunk turned a $25 step into the entire $100 budget
+            # — one break at 3.3x the net-exposure cap, and 4x the taker fee.
+            "order_amount_quote": (
+                min(_chunk_dec or Decimal(str(deployed)), Decimal(str(deployed)) / Decimal(levels))
+                if strategy == "rgrid"
+                else (_chunk_dec or Decimal(str(deployed)))
             ),
             "ladder_levels": 1 if strategy == "rgrid" else levels,
             # Step by the quoted spread, so level i sits at the anchor ± (i+1)
@@ -1470,8 +1476,20 @@ def map_risk_limits(
     deployed = margin * eff_lev
     levels = max(1, int(_f(settings, "levels", 2)))
     cap = _f(settings, "session_notional_cap_usd", 0.0) or (deployed * levels)
+    # LADDER-EXECUTOR-STARVATION (2026-08-03): ``levels + 2`` was sized for the
+    # CLASSIC grid, where one GridExecutor holds every level. The laddered
+    # quoters spawn one OrderExecutor per level PER SIDE, so they need 2 x
+    # levels. Under the old cap, `_quote_side(BUY)` runs first and eats the
+    # budget, and from levels=3 up the deep ask rungs were rejected every tick
+    # with `risk:max_open_executors` — a permanent 2:1 long-skewed book that
+    # accumulates inventory in a downtrend with half the depth to unwind it.
+    # Mid ladders unconditionally; grid/rgrid only on the fill-anchored path.
+    _laddered = strategy == "mid" or (
+        strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", 0.0))
+    )
+    _executor_budget = (2 * levels + 2) if _laddered else (levels + 2)
     return RiskLimits(
-        max_open_executors=levels + 2,
+        max_open_executors=_executor_budget,
         # A single bumped level can be up to the whole deployed size (when the
         # min-notional cap collapses the ladder to one level).
         max_single_order_quote=Decimal(str(deployed)),
@@ -1832,7 +1850,10 @@ async def _maybe_apply_overlay(
         # bias over it every cycle (even at confidence 0.01), so the setting
         # never reached live quoting. The overlay may steer the lean only while
         # the user is neutral; an explicit user lean is a binding contract.
-        if strategy == "mid" and "directional_bias" in overrides:
+        # USER-BIAS-WINS: grid joined mid as a bias consumer, so the guard must
+        # cover it too or the overlay silently overrides the user's own lean —
+        # the exact defect AUDIT-MID-2026-07-30 fixed for mid.
+        if strategy in ("mid", "grid") and "directional_bias" in overrides:
             from src.nadobro.quant.mm_quote_math import _resolve_directional_bias_value
 
             if abs(_resolve_directional_bias_value(state.get("directional_bias"))) > 1e-9:

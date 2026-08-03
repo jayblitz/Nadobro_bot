@@ -342,3 +342,69 @@ def test_grid_ladders_around_the_fill_anchor():
         assert abs(total - Decimal(1000)) < Decimal("0.01")
 
     asyncio.run(body())
+
+
+# ==========================================================================
+# Audit findings, 2026-08-03 (strategy-auditor on 4897dd7/410c20a/d0fe3df)
+# ==========================================================================
+def test_executor_budget_admits_the_whole_ladder_both_sides():
+    """AUDIT-F1 (critical): max_open_executors was `levels + 2`, sized for the
+    CLASSIC grid where ONE executor holds every level. The laddered quoters
+    spawn one per level PER SIDE. Bids reconcile first, so from levels=3 up the
+    deep ask rungs were rejected every tick with risk:max_open_executors — a
+    permanent 2:1 long-skewed book with half the depth to unwind it."""
+    from src.nadobro.strategy import engine_runtime as er
+
+    for levels in (1, 2, 3, 4, 8):
+        lim = er.map_risk_limits({"notional_usd": 100.0, "levels": levels}, "mid", leverage=1)
+        assert lim.max_open_executors >= 2 * levels, (
+            f"mid levels={levels}: budget {lim.max_open_executors} starves a {2*levels}-order ladder"
+        )
+        fa = er.map_risk_limits(
+            {"notional_usd": 100.0, "levels": levels, "fill_anchored": 1}, "grid", leverage=1
+        )
+        assert fa.max_open_executors >= 2 * levels, f"fill-anchored grid levels={levels}"
+    # The CLASSIC grid holds every level in one executor — it must NOT inflate.
+    classic = er.map_risk_limits({"notional_usd": 100.0, "levels": 4}, "grid", leverage=1)
+    assert classic.max_open_executors == 6
+
+
+def test_both_sides_actually_get_their_full_ladder():
+    """The end-to-end consequence of the budget fix."""
+    async def body():
+        from src.nadobro.engine.risk import RiskEngine
+        from src.nadobro.strategy import engine_runtime as er
+
+        adapter = BookAdapter("100.00", "100.10", min_notional="1")
+        orch = ExecutorOrchestrator()
+        orch.risk = RiskEngine(er.map_risk_limits(
+            {"notional_usd": 1000.0, "levels": 4}, "mid", leverage=1))
+        c = MarketMakingController(
+            user_id=1, orchestrator=orch, adapter=adapter,
+            inventory=InventoryRepository(),
+            configs=dict(TOUCH, ladder_levels=4, ladder_step_bp="10"),
+        )
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        m = c.ladder_metrics()
+        assert m["ladder_live_bids"] == 4 and m["ladder_live_asks"] == 4, m
+
+    asyncio.run(body())
+
+
+def test_curve_never_puts_a_rung_under_the_venue_minimum():
+    """AUDIT-F4 (money): max_levels answers 'how many EQUAL slices clear the
+    floor', but a curve makes near rungs far smaller than that average. Rungs
+    landed under the venue minimum and the venue CLIENT grows a sub-minimum
+    non-reducing order before signing — so the side deployed MORE than the
+    user's budget (measured +38% on geometric/8)."""
+    from src.nadobro.quant.ladder import GEOMETRIC, LINEAR, ladder_notional, plan_ladder
+
+    for curve in (LINEAR, GEOMETRIC):
+        for want in (2, 4, 8, 12):
+            plan = plan_ladder(100, levels=want, step_bp=1, curve=curve, min_notional=10)
+            assert plan, (curve, want)
+            assert min(lv.size_quote for lv in plan) >= Decimal(10), (
+                f"{curve}/{want}: rung under the venue floor -> client bumps it -> over-deployment"
+            )
+            assert ladder_notional(plan) == Decimal(100), "sizes must still sum exactly"

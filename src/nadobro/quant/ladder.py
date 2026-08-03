@@ -112,6 +112,19 @@ def plan_ladder(
     want = int(_dec(levels, "1") or 1)
     n = max(1, min(want, max_levels(deployed, min_notional)))
 
+    # LADDER-CURVE-UNDERSIZE (2026-08-03): ``max_levels`` answers "how many
+    # EQUAL slices clear the floor". A curve then makes the near rungs much
+    # smaller than that average — geometric over 8 levels puts 0.4% of the
+    # deployment on L0 — so rungs land under the venue minimum. Nothing
+    # rejected them: the venue client GROWS a sub-minimum non-reducing order
+    # before signing, so the side quietly deployed more than the user's budget
+    # (measured +38% on geometric/8). Step the level count down until the
+    # SMALLEST weighted rung clears the floor.
+    floor = _dec(min_notional)
+    if floor > 0:
+        while n > 1 and (deployed * min(_weights(n, curve)) / sum(_weights(n, curve), Decimal(0))) < floor:
+            n -= 1
+
     w = _weights(n, curve)
     total_w = sum(w, Decimal(0))
     first = _dec(first_offset_bp)
