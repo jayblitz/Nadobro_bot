@@ -439,3 +439,101 @@ def test_runtime_opt_in_maps_override_and_treadfi_defaults():
     )
     assert "controller_override" not in ladder_cfg
     assert "start_price" in ladder_cfg
+
+
+# ==========================================================================
+# RGrid take-profit — the "TP reset threshold", wired 2026-08-03
+# ==========================================================================
+# ``reset_threshold_pct`` was entirely DEAD on the momentum path: on_tick hands
+# off to _tick_momentum and returns before any reset logic runs, so the user's
+# RGrid setting changed nothing. It cannot mean grid's soft reset here — grid
+# re-anchors on DRIFT, but in momentum a drift IS the entry signal. It is the
+# profit target: momentum adds into a move and had no way to bank it.
+def test_momentum_take_profit_banks_a_winning_long():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _controller(adapter, mode="rgrid", extra={
+            "momentum": True, "reset_threshold_pct": Decimal("0.01"),   # 1%
+        })
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)                 # anchor 100
+        adapter.set_mid(Decimal("101"))                  # break up -> buy
+        await orch.tick_controller(c.id)
+        await orch.tick_controller(c.id)                 # absorb the fill
+        assert len(_takers(adapter, TradeType.BUY)) == 1
+        opens = len(adapter.placed)
+        adapter.set_mid(Decimal("103"))                  # ~2% above entry > 1%
+        await orch.tick_controller(c.id)
+        assert len(adapter.placed) > opens, "take-profit never fired"
+        assert _takers(adapter, TradeType.SELL), "a winning long must be SOLD to bank it"
+
+    asyncio.run(body())
+
+
+def test_momentum_take_profit_is_disabled_when_the_target_sits_inside_the_band():
+    """A target narrower than the entry band would close the position before the
+    break that opened it is even established — a trend follower turned scalper.
+    rgrid's shipped 0.125% default is narrower than its 0.1% band, so this guard
+    is what stops the default config from self-destructing."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _controller(adapter, mode="rgrid", extra={
+            "momentum": True, "reset_threshold_pct": Decimal("0.00125"),  # < 2x band
+        })
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        adapter.set_mid(Decimal("101"))
+        await orch.tick_controller(c.id)
+        await orch.tick_controller(c.id)
+        buys = len(_takers(adapter, TradeType.BUY))
+        adapter.set_mid(Decimal("101.5"))
+        await orch.tick_controller(c.id)
+        assert _takers(adapter, TradeType.SELL) == [], "closed inside its own entry band"
+        assert len(_takers(adapter, TradeType.BUY)) >= buys
+
+    asyncio.run(body())
+
+
+def test_momentum_take_profit_never_fires_on_a_loser():
+    """Excursion-gated: it banks a FAVOURABLE move only. Asserted directly on
+    the decision function — going through on_tick would let a legitimate
+    reversal ENTRY masquerade as a take-profit and make the test vacuous."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _controller(adapter, mode="rgrid", extra={
+            "momentum": True, "reset_threshold_pct": Decimal("0.01"),
+        })
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        adapter.set_mid(Decimal("101"))                  # break up -> long
+        await orch.tick_controller(c.id)
+        await orch.tick_controller(c.id)                 # absorb the fill
+        assert c._net_base() > 0, "expected a long position to test against"
+        c._pending_taker_id = None                       # clear the in-flight guard
+
+        assert await c._maybe_take_profit(Decimal("99")) is False, \
+            "fired on a 2% LOSS"
+        assert await c._maybe_take_profit(Decimal("101")) is False, \
+            "fired below the 1% target"
+        assert await c._maybe_take_profit(Decimal("103")) is True, \
+            "did not fire on a 2% winner"
+
+    asyncio.run(body())
+
+
+def test_take_profit_threshold_is_off_when_disarmed():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch, c = _controller(adapter, mode="rgrid", extra={
+            "momentum": True, "reset_threshold_pct": Decimal(0),
+        })
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        adapter.set_mid(Decimal("101"))
+        await orch.tick_controller(c.id)
+        await orch.tick_controller(c.id)
+        adapter.set_mid(Decimal("120"))                  # 19% winner
+        await orch.tick_controller(c.id)
+        assert _takers(adapter, TradeType.SELL) == [], "disarmed threshold still closed"
+
+    asyncio.run(body())

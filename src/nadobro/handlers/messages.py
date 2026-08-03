@@ -1656,12 +1656,15 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "min_spread_bp": (0.1, 200),
         "max_spread_bp": (0.1, 500),
         "vol_sensitivity": (0.0, 1.0),
-        "grid_reset_threshold_pct": (0.05, 20),
+        # Soft-reset drift band: grid re-anchors on small drifts (1% ceiling);
+        # rgrid follows trends and needs a far wider band. Must match the
+        # button path in strategy_handler.py or the two disagree.
+        "grid_reset_threshold_pct": (0.05, 1.0),
         "grid_reset_timeout_seconds": (15, 86400),
         "rgrid_spread_bp": (0.1, 200),
         "rgrid_stop_loss_pct": (0.05, 100),
         "rgrid_take_profit_pct": (0.05, 200),
-        "rgrid_reset_threshold_pct": (0.05, 20),
+        "rgrid_reset_threshold_pct": (0.1, 10.0),
         "rgrid_reset_timeout_seconds": (15, 86400),
         "rgrid_discretion": (0.01, 0.5),
         "dgrid_trend_on_variance_ratio": (1.0, 5.0),

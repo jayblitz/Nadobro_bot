@@ -163,3 +163,102 @@ def test_grid_card_shows_the_ladder_and_drops_the_dead_knobs():
     # them all, which is what made the Grid card misleading.
     for dead in ("Move to quote", "Close offset", "Quote TTL"):
         assert dead not in text, f"dead knob still on the Grid card: {dead}"
+
+
+# ==========================================================================
+# Reset / take-profit threshold ranges (2026-08-03)
+# ==========================================================================
+_GRID_RANGE = (0.05, 1.0)     # grid re-anchors on SMALL drifts
+_RGRID_RANGE = (0.1, 10.0)    # rgrid follows trends and banks far from entry
+
+
+def _bounds(field: str) -> tuple:
+    """The (lo, hi) the BUTTON path validates against, read from the source so
+    the test can't drift from the dict it is asserting on."""
+    block = _SOURCE.split("limits = {", 1)[1]
+    for line in block.splitlines():
+        if line.strip().startswith(f'"{field}"'):
+            lo, hi = line.split("(", 1)[1].split(")", 1)[0].split(",")
+            return float(lo), float(hi)
+    raise AssertionError(f"{field} has no limits entry")
+
+
+def test_threshold_ranges_match_the_specified_bands():
+    assert _bounds("grid_reset_threshold_pct") == _GRID_RANGE
+    assert _bounds("rgrid_reset_threshold_pct") == _RGRID_RANGE
+
+
+def test_button_and_typed_input_paths_agree_on_the_bands():
+    """The buttons live in strategy_handler and typed replies are validated in
+    messages.py — two separate dicts. When they disagree, a value you can tap is
+    rejected when typed (or vice versa)."""
+    import re as _re
+
+    msg_src = open(
+        __import__("src.nadobro.handlers.messages", fromlist=["x"]).__file__
+    ).read()
+    for field, expected in (
+        ("grid_reset_threshold_pct", _GRID_RANGE),
+        ("rgrid_reset_threshold_pct", _RGRID_RANGE),
+    ):
+        m = _re.search(rf'"{field}":\s*\(([^)]+)\)', msg_src)
+        assert m, f"{field} missing from the typed-input limits"
+        lo, hi = (float(x) for x in m.group(1).split(","))
+        assert (lo, hi) == expected, f"{field}: messages.py says {(lo, hi)}"
+
+
+def test_every_threshold_button_lands_inside_its_band():
+    for sid, field, (lo, hi) in (
+        ("grid", "grid_reset_threshold_pct", _GRID_RANGE),
+        ("rgrid", "rgrid_reset_threshold_pct", _RGRID_RANGE),
+    ):
+        emitted = _emitted(f"strategy:set:{sid}:{field}:")
+        assert emitted, f"{sid} lost its {field} buttons"
+        for cb in emitted:
+            v = float(cb.rsplit(":", 1)[1])
+            assert lo <= v <= hi, f"{cb} outside {lo}..{hi} — the tap is swallowed"
+        vals = {float(c.rsplit(":", 1)[1]) for c in emitted}
+        assert min(vals) == lo, f"{sid} offers no button at the {lo} floor"
+        assert max(vals) == hi, f"{sid} offers no button at the {hi} ceiling"
+
+
+def test_registry_defaults_sit_inside_the_new_bands():
+    """A default outside the band is unreachable from the UI: the user can never
+    return to it after changing the value."""
+    from src.nadobro.strategy.strategy_registry import SETTINGS_STRATEGY_DEFAULTS
+
+    grid = SETTINGS_STRATEGY_DEFAULTS["grid"]["grid_reset_threshold_pct"]
+    assert _GRID_RANGE[0] <= grid <= _GRID_RANGE[1], grid
+    rgrid = SETTINGS_STRATEGY_DEFAULTS["rgrid"]["rgrid_reset_threshold_pct"]
+    assert _RGRID_RANGE[0] <= rgrid <= _RGRID_RANGE[1], rgrid
+
+
+# ==========================================================================
+# No third-party product names in the UI
+# ==========================================================================
+def test_no_tread_branding_in_any_user_facing_string():
+    """Card/button/message text must not name another product. Comments and
+    docstrings are historical references and are deliberately not scanned."""
+    import ast
+    import pathlib
+
+    offenders = []
+    for path in pathlib.Path("src").rglob("*.py"):
+        try:
+            tree = ast.parse(path.read_text())
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", None)
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    docstrings.add(id(body[0].value))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                    and id(node) not in docstrings:
+                low = node.value.lower()
+                if "tread" in low and "thread" not in low:
+                    offenders.append(f"{path}:{node.lineno}: {node.value[:60]}")
+    assert not offenders, "third-party name in user-facing strings:\n" + "\n".join(offenders)

@@ -1064,30 +1064,52 @@ class MMDurationTests(unittest.TestCase):
         self.assertAlmostEqual(c, 1000.0, places=6)
 
     def test_resolve_cycle_notional(self):
+        """THROUGHPUT FLOOR (2026-08-03): sizing purely off the participation
+        rate produced cycles far too small to build volume on a venue as thin as
+        Nado — 5%/min of a $14.4M pair is $500 a minute. Every sized cycle is now
+        floored at MIN_CYCLE_NOTIONAL_USD, and the cadence used for sizing is
+        capped at MAX_CYCLE_INTERVAL_SECONDS, so the floor means throughput
+        rather than being stretched over an arbitrarily long interval."""
+        from src.nadobro.quant.pov_engine import MIN_CYCLE_NOTIONAL_USD
         from src.nadobro.strategy.bot_runtime import _resolve_mm_cycle_notional_usd
+
         base = {"interval_seconds": 60}  # 1-minute cycle; vol 14.4M → vpm 10000
-        # Participation scales the chunk: aggressive 0.10 > normal 0.05 > passive 0.01.
-        agg = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "aggressive"}, 100000, 14_400_000, 100)
-        nrm = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "normal"}, 100000, 14_400_000, 100)
-        pas = _resolve_mm_cycle_notional_usd({**base, "participation_preset": "passive"}, 100000, 14_400_000, 100)
-        self.assertAlmostEqual(agg, 1000.0, places=6)
-        self.assertAlmostEqual(nrm, 500.0, places=6)
-        self.assertAlmostEqual(pas, 100.0, places=6)
+        # On a thin pair every preset lands ON the floor — that is the point.
+        for preset in ("aggressive", "normal", "passive"):
+            got = _resolve_mm_cycle_notional_usd(
+                {**base, "participation_preset": preset}, 100000, 14_400_000, 100
+            )
+            self.assertAlmostEqual(got, MIN_CYCLE_NOTIONAL_USD, places=6, msg=preset)
+
+        # ABOVE the floor, participation still orders the presets. vpm = 1e6, so
+        # even passive (1%) clears the floor and the rates separate again.
+        deep = {**base, "participation_preset": None}
+        agg, nrm, pas = (
+            _resolve_mm_cycle_notional_usd(
+                {**deep, "participation_preset": p}, 10**9, 1_440_000_000, 100
+            )
+            for p in ("aggressive", "normal", "passive")
+        )
+        self.assertAlmostEqual(agg, 100_000.0, places=6)
+        self.assertAlmostEqual(nrm, 50_000.0, places=6)
+        self.assertAlmostEqual(pas, 10_000.0, places=6)
         self.assertTrue(agg > nrm > pas)
+
         # Opt-out: no preset → 0 (keep deployed-based sizing).
         self.assertEqual(_resolve_mm_cycle_notional_usd(base, 100000, 14_400_000, 100), 0.0)
         # No volume → 0 (can't size a chunk).
         self.assertEqual(
             _resolve_mm_cycle_notional_usd({**base, "participation_preset": "normal"}, 100000, 0, 100), 0.0
         )
-        # Capped at the deployed budget; floored at the venue min notional.
+        # The DEPLOYED BUDGET still caps everything — the floor must never place
+        # money the user has not allocated. This is the invariant that matters.
         self.assertAlmostEqual(
             _resolve_mm_cycle_notional_usd({**base, "participation_preset": "aggressive"}, 50, 14_400_000, 100),
             50.0, places=6,
         )
         self.assertAlmostEqual(
-            _resolve_mm_cycle_notional_usd({**base, "participation_preset": "passive"}, 100000, 14400, 100),
-            100.0, places=6,
+            _resolve_mm_cycle_notional_usd({**base, "participation_preset": "passive"}, 250, 14400, 100),
+            250.0, places=6,
         )
 
 

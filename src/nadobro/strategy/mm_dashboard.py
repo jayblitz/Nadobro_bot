@@ -211,10 +211,15 @@ def build_pretrade_breakdown(
 
     pov_meta = None
     if participation_preset and pair_24h_volume_usd and pair_24h_volume_usd > 0:
+        # Preview the DEPLOYED budget at the bot's REAL cadence — the card used
+        # to pass raw margin and let pov_engine invent a 1200s cycle, so it
+        # showed "$100 every 1200s" for a bot placing margin x leverage every
+        # 60s. Same inputs as the live path now.
         pov_meta = pov_engine.compute_pov_duration(
-            notional_usd=notional_usd,
+            notional_usd=float(notional_usd) * max(1.0, float(leverage or 1.0)),
             preset=str(participation_preset),
             pair_24h_volume_usd=float(pair_24h_volume_usd),
+            interval_seconds=conf.get("interval_seconds"),
         )
 
     # Per-cycle "expected placed notional" for the fee preview. When POV is on

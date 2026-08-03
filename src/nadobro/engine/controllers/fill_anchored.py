@@ -215,16 +215,83 @@ class FillAnchoredQuotingController(MarketMakingController):
         # absorbed into the exposure VWAP) before considering the next step.
         if self._taker_in_flight():
             return
+        # TAKE PROFIT (momentum): bank the move before considering another add.
+        if await self._maybe_take_profit(mid):
+            return
         band = max(self.spread_ask_pct, self.spread_floor_half_pct)
         ref = self._exposure_vwap() or self._reference or mid
         if ref <= 0:
             return
+        self._last_ref = ref
         buy_trigger = ref * (Decimal(1) + band)
         sell_trigger = ref * (Decimal(1) - band)
         if mid >= buy_trigger and allow_buy:
             await self._fire_taker(TradeType.BUY, mid)
         elif mid <= sell_trigger and allow_sell:
             await self._fire_taker(TradeType.SELL, mid)
+
+    async def _maybe_take_profit(self, mid: Decimal) -> bool:
+        """Momentum take-profit — the RGrid "TP reset threshold", finally live.
+
+        ``reset_threshold_pct`` was entirely DEAD on this path: ``on_tick``
+        hands off to ``_tick_momentum`` and returns before any reset logic runs,
+        so the user's RGrid setting changed nothing at all.
+
+        It cannot mean grid's soft reset here. Grid re-anchors to mid when price
+        DRIFTS from the reference — but in momentum a drift IS the entry signal,
+        so re-anchoring on drift suppresses the very break the strategy exists
+        to trade (proved by the momentum entry tests). What the threshold means
+        for a trend follower is the profit target: momentum added into the move
+        and had no way to bank it, only a reversal exit at ±band.
+
+        So: once the position's FAVOURABLE excursion from the exposure price
+        reaches the threshold, close it reduce-only and let the band re-arm a
+        fresh entry. Reduce-only, so this can never open or flip a position.
+        Returns True when an order was fired.
+        """
+        if self.reset_threshold_pct <= 0:
+            return False
+        # A profit target INSIDE the entry band is not a target — the position
+        # would be closed before the break that opened it is even established,
+        # turning a trend follower into a scalper. rgrid ships a 0.125%
+        # threshold sized for the maker path's soft reset, which is narrower
+        # than the 0.1% entry band, so require clear separation before acting.
+        band = max(self.spread_ask_pct, self.spread_floor_half_pct)
+        if self.reset_threshold_pct < band * Decimal(2):
+            return False
+        net = self._net_base()
+        if net == 0 or mid <= 0:
+            return False
+        entry = self._exposure_vwap() or self._reference
+        if entry is None or entry <= 0:
+            return False
+        # Favourable direction depends on which way we are positioned.
+        excursion = ((mid - entry) / entry) if net > 0 else ((entry - mid) / entry)
+        if excursion < self.reset_threshold_pct:
+            return False
+        side = TradeType.SELL if net > 0 else TradeType.BUY
+        oc = OrderExecutorConfig(
+            self.trading_pair, side, abs(net), ExecutionStrategy.MARKET,
+            leverage=int(self.cfg("leverage", 1) or 1),
+            position_action=PositionAction.CLOSE,   # reduce-only: never adds/flips
+        )
+        ex = OrderExecutor(
+            oc, user_id=self.user_id, controller_id=self.id,
+            adapter=self.adapter, inventory=self.inventory,
+        )
+        if not await self.spawn_executor(
+            ex, ExecutorRequest(order_amount_quote=abs(net) * mid)
+        ):
+            return False
+        self._pending_taker_id = ex.id
+        logger.info(
+            "rgrid take-profit: %s%% excursion from exposure %s reached the %s%% "
+            "threshold — closing %s %s (user=%s pair=%s)",
+            round(float(excursion) * 100, 3), entry,
+            round(float(self.reset_threshold_pct) * 100, 3),
+            side.name, abs(net), self.user_id, self.trading_pair,
+        )
+        return True
 
     def _current_reference(self, mid: Decimal) -> Decimal:
         if self.mode == "rgrid":
