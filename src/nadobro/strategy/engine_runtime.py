@@ -911,7 +911,7 @@ def map_strategy_config(
                 if str(settings.get("mm_quote_mode") or "mid").lower() == "touch"
                 else spread_frac * Decimal(10000)
             ),
-            "ladder_curve": str(settings.get("mm_size_curve") or "flat"),
+            "ladder_curve": str(settings.get("size_curve") or "flat"),
             # PHASE 0 (queue preservation): Mid runs on an 8s fast cadence, so a
             # tolerance-driven cancel could bin a quote after 8s of queue time.
             # On BTC-PERP the spread is a single tick — a quote cannot be
@@ -1151,6 +1151,8 @@ def map_strategy_config(
     # via fill_anchored=1.
     _fa_default = 0.0
     if strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", _fa_default)):
+        from src.nadobro.quant.mm_quote_math import _resolve_directional_bias_value
+
         default_reset = 0.25 if strategy == "grid" else 0.125
         # The UI writes the reset threshold under per-strategy keys
         # (grid_reset_threshold_pct / rgrid_reset_threshold_pct), but the
@@ -1194,7 +1196,7 @@ def map_strategy_config(
             # Step by the quoted spread, so level i sits at the anchor ± (i+1)
             # spreads — the same geometry as the classic grid ladder.
             "ladder_step_bp": (spread_frac if spread_frac > 0 else Decimal("0.001")) * Decimal(10000),
-            "ladder_curve": str(settings.get("grid_size_curve") or "flat"),
+            "ladder_curve": str(settings.get("size_curve") or "flat"),
             "min_quote_lifetime_s": _min_quote_lifetime_s(strategy, settings),
             "price_distance_tolerance": (spread_frac / Decimal(2)) or Decimal("0.0005"),
             "leverage": int(eff_lev),
@@ -1210,6 +1212,17 @@ def map_strategy_config(
             # stalls for N ticks, a bounded reduce-only taker concession flattens
             # part of the one-sided exposure before the SL rail. Grid only
             # (rgrid is momentum-driven, no soft reset).
+            # Directional bias. Grid's registry carries a directional_bias
+            # setting that nothing read — the fill-anchored controller now
+            # applies the same skew Mid does, so honour it (and the overlay's
+            # signal, which lands on this same key). rgrid is momentum-driven
+            # and ignores it. NOTE: unlike Mid, grid's net-exposure cap is NOT
+            # scaled up by |bias| — the lean works inside the cap the user
+            # already has, so enabling this cannot raise anyone's exposure.
+            "directional_bias": (
+                _resolve_directional_bias_value(settings.get("directional_bias"))
+                if strategy == "grid" else 0.0
+            ),
             "concession_enabled": strategy == "grid",
             "concession_escalation_ticks": int(max(1.0, _f(settings, "grid_concession_ticks", 5.0))),
             "concession_fraction": _f(settings, "grid_concession_fraction", 0.5),

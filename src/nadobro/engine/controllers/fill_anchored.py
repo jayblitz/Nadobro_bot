@@ -343,12 +343,18 @@ class FillAnchoredQuotingController(MarketMakingController):
         soft_reset = drift > self.reset_threshold_pct
         self._soft_reset_active = bool(soft_reset and self.mode == "grid")
 
+        # Directional bias, applied through the SAME skew Mid uses. Grid inherits
+        # Mid's quoting machinery, so the signal overlay's bias (and the user's
+        # own setting) must steer this book too — previously both were computed
+        # and then silently dropped here. bias=0 is symmetric, i.e. unchanged.
+        spread_bid_pct, spread_ask_pct = self.effective_spreads()
+
         if self.mode != "grid":
             # rgrid maker (non-momentum): symmetric re-anchor to mid on drift,
             # no no-cross (the quotes follow the trend).
             anchor = mid if soft_reset else ref
-            target_bid = anchor * (Decimal(1) - self.spread_bid_pct)
-            target_ask = anchor * (Decimal(1) + self.spread_ask_pct)
+            target_bid = anchor * (Decimal(1) - spread_bid_pct)
+            target_ask = anchor * (Decimal(1) + spread_ask_pct)
         elif soft_reset:
             # SOFT RESET (drift escaped the band): re-anchor BOTH legs to mid so
             # neither is stranded across it, then DROP the no-cross clamp on the
@@ -356,24 +362,24 @@ class FillAnchoredQuotingController(MarketMakingController):
             # below cost (the documented "switch the behind leg to mid-market"
             # circuit-breaker). The profit/flat leg keeps no-cross, so it never
             # adds at a loss. net long ⇒ SELL behind; net short ⇒ BUY behind.
-            target_bid = mid * (Decimal(1) - self.spread_bid_pct)
-            target_ask = mid * (Decimal(1) + self.spread_ask_pct)
+            target_bid = mid * (Decimal(1) - spread_bid_pct)
+            target_ask = mid * (Decimal(1) + spread_ask_pct)
             sell_behind = base_value > 0
             buy_behind = base_value < 0
             if not buy_behind and self._last_sell_px is not None:
-                target_bid = min(target_bid, self._last_sell_px * (Decimal(1) - self.spread_bid_pct))
+                target_bid = min(target_bid, self._last_sell_px * (Decimal(1) - spread_bid_pct))
             if not sell_behind and self._last_buy_px is not None:
-                target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + self.spread_ask_pct))
+                target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + spread_ask_pct))
         else:
             # Normal grid: both legs at the last-fill reference with the full
             # no-cross invariant — never buy above the last sell, never sell below
             # the last buy (every round trip captures spread).
-            target_bid = ref * (Decimal(1) - self.spread_bid_pct)
-            target_ask = ref * (Decimal(1) + self.spread_ask_pct)
+            target_bid = ref * (Decimal(1) - spread_bid_pct)
+            target_ask = ref * (Decimal(1) + spread_ask_pct)
             if self._last_sell_px is not None:
-                target_bid = min(target_bid, self._last_sell_px * (Decimal(1) - self.spread_bid_pct))
+                target_bid = min(target_bid, self._last_sell_px * (Decimal(1) - spread_bid_pct))
             if self._last_buy_px is not None:
-                target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + self.spread_ask_pct))
+                target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + spread_ask_pct))
 
         # Forward the same mark used for exposure decisions. The inherited
         # reconciler projects each quote against the exposure cap. With

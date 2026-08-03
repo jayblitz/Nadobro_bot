@@ -244,6 +244,26 @@ class MarketMakingController(Controller):
         self._touch_bid, self._touch_ask = bid, ask
         return target_bid, target_ask, (bid + ask) / Decimal(2)
 
+    def effective_spreads(self) -> Tuple[Decimal, Decimal]:
+        """Per-side spreads after the directional-bias skew.
+
+        The favoured side quotes closer to the reference (fills more) and the
+        other side further (fills less), accumulating the desired inventory
+        lean. Floored so neither side quotes through the fee-clearing minimum;
+        bias=0 leaves the quotes symmetric.
+
+        Shared with the fill-anchored subclass: Grid inherits this controller's
+        quoting machinery, so the signal overlay's bias must steer it the same
+        way it steers Mid rather than being silently dropped.
+        """
+        if self.directional_bias == 0:
+            return self.spread_bid_pct, self.spread_ask_pct
+        skew = self.directional_bias * _BIAS_SKEW_STRENGTH
+        return (
+            max(self.spread_floor_half_pct, self.spread_bid_pct * (Decimal(1) - skew)),
+            max(self.spread_floor_half_pct, self.spread_ask_pct * (Decimal(1) + skew)),
+        )
+
     def _unrealized(self, mid: Decimal) -> Decimal:
         if self.inventory is None:
             return Decimal(0)
@@ -296,16 +316,7 @@ class MarketMakingController(Controller):
             self.spread_bid_pct = half
             self.spread_ask_pct = half
 
-        # Directional bias: skew the per-side spreads so the favored side quotes
-        # closer to mid (fills more) and the other side further (fills less),
-        # accumulating the desired inventory lean. Floored so neither side quotes
-        # through the fee-clearing minimum; bias=0 leaves the quotes symmetric.
-        eff_bid_pct = self.spread_bid_pct
-        eff_ask_pct = self.spread_ask_pct
-        if self.directional_bias != 0:
-            skew = self.directional_bias * _BIAS_SKEW_STRENGTH
-            eff_bid_pct = max(self.spread_floor_half_pct, self.spread_bid_pct * (Decimal(1) - skew))
-            eff_ask_pct = max(self.spread_floor_half_pct, self.spread_ask_pct * (Decimal(1) + skew))
+        eff_bid_pct, eff_ask_pct = self.effective_spreads()
 
         target_bid = mid * (Decimal(1) - eff_bid_pct)
         target_ask = mid * (Decimal(1) + eff_ask_pct)

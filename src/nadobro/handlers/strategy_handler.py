@@ -1006,12 +1006,20 @@ async def _handle_strategy(query, data, context, telegram_id):
             "participation_preset": {"aggressive", "normal", "passive", "off"},
             # Volume Bot execution algo (maker TWAP default / chase / taker).
             "vol_execution_algo": {"twap", "chase", "taker"},
+            # Ladder size curve (Mid + fill-anchored Grid): how the side's
+            # deployment is distributed across levels. flat = equal size;
+            # linear/geometric put progressively more size on the deeper
+            # levels, i.e. scale harder into an adverse move.
+            "size_curve": {"flat", "linear", "geometric"},
         }
         allowed_vals = allowed_text.get(field, set())
         if raw_value not in allowed_vals:
             return
         # participation_preset is only meaningful for the MM family.
         if field == "participation_preset" and strategy_id not in ("grid", "rgrid", "dgrid", "mid"):
+            return
+        # size_curve only drives the laddered quoters (Mid + fill-anchored Grid).
+        if field == "size_curve" and strategy_id not in ("grid", "mid"):
             return
 
         def _mutate(s):
@@ -1512,7 +1520,7 @@ def _strategy_section_for_field(strategy: str, field: str) -> str:
     if strategy == "vol":
         return "risk"
     if strategy == "grid":
-        if field in {"min_spread_bp", "max_spread_bp"}:
+        if field in {"min_spread_bp", "max_spread_bp", "grid_reset_threshold_pct"}:
             return "execution"
         if field in {"cycle_notional_usd", "inventory_soft_limit_usd", "session_notional_cap_usd"}:
             return "risk"
@@ -1602,6 +1610,26 @@ def _mm_sizing_line(conf: dict) -> str:
     )
 
 
+def _ladder_line(conf: dict) -> str:
+    """'Levels: N x $S each | Curve: FLAT' for the laddered quoters.
+
+    Shows the PER-LEVEL size because that is the number the venue minimum acts
+    on: the planner drops levels whose size falls under the product floor, so a
+    user picking 8 levels on a small margin needs to see each rung shrink. The
+    total never changes — levels redistribute the same deployment.
+    """
+    levels = max(1, int(conf.get("levels", 2) or 2))
+    margin = float(conf.get("notional_usd", 100.0) or 0.0)
+    deployed = margin * _mm_effective_leverage(conf)
+    per_level = deployed / levels if levels > 0 else deployed
+    curve = str(conf.get("size_curve") or "flat").upper()
+    shape = "" if curve == "FLAT" else " \\(deeper rungs larger\\)"
+    return (
+        f"Levels: *{escape_md(str(levels))}* × *{escape_md(f'${per_level:,.0f}')}* each "
+        f"\\| Curve: *{escape_md(curve)}*{shape}"
+    )
+
+
 def _conf_for_card(settings: dict, strategy_id: str, context) -> dict:
     """The strategy's stored config PLUS the product the user has selected.
 
@@ -1680,41 +1708,51 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
     sl_pct = float(conf.get("sl_pct", 0.5))
 
     if strategy == "grid":
+        # Fill-anchored Grid reads NONE of threshold_bp / close_offset_bp /
+        # reference_mode / quote_ttl_seconds / inventory_soft_limit_usd /
+        # cycle_notional_usd — yet all of them were rendered here, and the
+        # Execution tab's text described knobs its own keyboard had already
+        # replaced with the spread band. Only live values appear now.
+        from src.nadobro.quant.mm_quote_math import _resolve_directional_bias_value
+
+        try:
+            g_bias = float(_resolve_directional_bias_value(conf.get("directional_bias")))
+        except (TypeError, ValueError):
+            g_bias = 0.0
+        g_bias_str = (
+            f"LONG {g_bias:+.2f}" if g_bias > 0
+            else (f"SHORT {g_bias:+.2f}" if g_bias < 0 else "NEUTRAL")
+        )
         if section == "execution":
-            threshold_str = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
-            close_offset_str = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
-            ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
-            bias = str(conf.get("directional_bias", "neutral")).upper()
-            pov_label = str(conf.get("participation_preset") or "OFF").upper()
+            min_spread = float(conf.get("min_spread_bp", 2.0))
+            max_spread = float(conf.get("max_spread_bp", 20.0))
+            reset_pct = float(conf.get("grid_reset_threshold_pct", 0.2) or 0.2)
             return (
-                "⚙️ *GRID · Execution*\n\n"
-                f"Threshold: *{escape_md(threshold_str)}* \\| "
-                f"Close offset: *{escape_md(close_offset_str)}*\n"
-                f"Reference: *{escape_md(ref_mode)}* \\| "
-                f"Bias: *{escape_md(bias)}*\n"
-                f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n\n"
-                "Tune how quotes react to the market\\."
+                "⚙️ *GRID · Spread*\n\n"
+                f"Spread band: *{escape_md(f'{min_spread:.1f} – {max_spread:.1f} bp')}*\n"
+                f"Soft reset: *{escape_md(f'{reset_pct:.2f}%')}* drift from the anchor\n\n"
+                "The band floors and caps the auto\\-spread\\. Soft reset re\\-anchors both "
+                "legs to mid when price runs away from the last fill\\."
             )
         if section == "risk":
-            cycle_budget = f"${float(conf.get('cycle_notional_usd', notional)):,.0f}"
-            inventory_limit = f"${float(conf.get('inventory_soft_limit_usd', notional * 0.6)):,.0f}"
-            ttl_str = f"{int(conf.get('quote_ttl_seconds', 90))}s"
-            session_cap_value = float(conf.get("session_notional_cap_usd", 0) or 0)
-            session_cap = f"${session_cap_value:,.0f}" if session_cap_value > 0 else "OFF"
             return (
                 "⚙️ *GRID · Risk*\n\n"
-                f"PnL TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}* of margin\n"
-                f"Cycle budget: *{escape_md(cycle_budget)}* \\| "
-                f"Inventory limit: *{escape_md(inventory_limit)}*\n"
-                f"TTL: *{escape_md(ttl_str)}* \\| "
-                f"Session cap: *{escape_md(session_cap)}*\n\n"
-                "Control downside and pacing here\\. These are PnL stops, not raw price\\-move stops\\."
+                f"PnL TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}* of margin\n\n"
+                "Judged NET of fees on live PnL including unrealised\\. Underneath, the "
+                "net\\-exposure cap suppresses whichever side worsens exposure, and a "
+                "bounded reduce\\-only concession unsticks a stalled soft reset\\."
             )
+        pov_label = str(conf.get("participation_preset") or "OFF").upper()
         return (
             "⚙️ *GRID · Core*\n\n"
-            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Bias: *{escape_md(g_bias_str)}*\n"
+            f"{_ladder_line(conf)}\n"
+            f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n"
             f"{_mm_sizing_line(conf)}\n\n"
-            "Set the main loop size and cadence\\. *Position size \\= margin × leverage*\\."
+            "Quotes step away from the LAST FILL, never buying above the last sell or "
+            "selling below the last buy\\. Levels split the same margin into rungs so the "
+            "book scales in and out of a move — they never add exposure\\."
         )
 
     if strategy == "rgrid":
@@ -1784,10 +1822,12 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         )
 
     if strategy == "mid":
-        # Mid Mode: lean Tread parity — pure mid ± spread. No anchor / no
-        # soft-reset. AUDIT-MID-2026-07-30 #5: "Levels" and "Reference" were
-        # displayed here but are NOT consumed by the mid mapping (a single bid
-        # + ask at full size, always mid-referenced) — dead knobs off the card.
+        # Mid Mode: pure mid ± spread. No anchor / no soft-reset.
+        # AUDIT-MID-2026-07-30 #5 pulled "Levels" and "Reference" off this card
+        # because the mid mapping consumed neither. LADDER (2026-08-02) made
+        # Levels real — it now splits the side's deployment across levels
+        # stepping away from mid — so it is back, with the size curve beside it.
+        # "Reference" stays off: mid mode is always mid-referenced.
         try:
             bias_val = float(conf.get("directional_bias", 0.0) or 0.0)
         except (TypeError, ValueError):
@@ -1809,9 +1849,12 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "⚙️ *MID MODE · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Spread: *{escape_md(f'{spread_bp:+.1f} bp')}* \\| Bias: *{escape_md(bias_str)}*\n"
+            f"{_ladder_line(conf)}\n"
             f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n"
             f"{_mm_sizing_line(conf)}\n\n"
-            "Pure mid ± spread, one bid \\+ one ask\\. No anchor, no soft\\-reset\\. "
+            "Pure mid ± spread\\. No anchor, no soft\\-reset\\. Levels split the same "
+            "margin into rungs stepping away from mid — more rungs scale in and out "
+            "of a move; they never add exposure\\. "
             "Bias range −1\\.0 → \\+1\\.0 \\(short → long\\); \\|1\\.0\\| adds 20% margin\\."
         )
 
@@ -1928,6 +1971,19 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:grid:spread_bp:5"),
                     InlineKeyboardButton("Spread 10bp", callback_data="strategy:set:grid:spread_bp:10"),
                 ],
+                # LADDER: how many rungs the side's margin is split across, and
+                # how size is distributed over them. The same total either way.
+                [
+                    InlineKeyboardButton("Levels 1", callback_data="strategy:set:grid:levels:1"),
+                    InlineKeyboardButton("2", callback_data="strategy:set:grid:levels:2"),
+                    InlineKeyboardButton("4", callback_data="strategy:set:grid:levels:4"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:grid:levels"),
+                ],
+                [
+                    InlineKeyboardButton("Curve Flat", callback_data="strategy:set_text:grid:size_curve:flat"),
+                    InlineKeyboardButton("Linear", callback_data="strategy:set_text:grid:size_curve:linear"),
+                    InlineKeyboardButton("Geometric", callback_data="strategy:set_text:grid:size_curve:geometric"),
+                ],
                 [
                     InlineKeyboardButton("30s", callback_data="strategy:set:grid:interval_seconds:30"),
                     InlineKeyboardButton("60s", callback_data="strategy:set:grid:interval_seconds:60"),
@@ -1969,6 +2025,15 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Max Spread 30bp", callback_data="strategy:set:grid:max_spread_bp:30"),
                     InlineKeyboardButton("50bp", callback_data="strategy:set:grid:max_spread_bp:50"),
                     InlineKeyboardButton("100bp", callback_data="strategy:set:grid:max_spread_bp:100"),
+                ],
+                # Soft-reset threshold: fully validated and prompt-ready in the
+                # backend since it shipped, but no button existed anywhere, so
+                # the value could never be changed from the UI.
+                [
+                    InlineKeyboardButton("Reset 0.2%", callback_data="strategy:set:grid:grid_reset_threshold_pct:0.2"),
+                    InlineKeyboardButton("0.5%", callback_data="strategy:set:grid:grid_reset_threshold_pct:0.5"),
+                    InlineKeyboardButton("1.0%", callback_data="strategy:set:grid:grid_reset_threshold_pct:1.0"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:grid:grid_reset_threshold_pct"),
                 ],
                 [
                     InlineKeyboardButton("Custom Min Spread", callback_data="strategy:input:grid:min_spread_bp"),
@@ -2251,6 +2316,21 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Tight 2bp", callback_data="strategy:set:mid:spread_bp:2"),
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:mid:spread_bp:5"),
                     InlineKeyboardButton("Spread 25bp", callback_data="strategy:set:mid:spread_bp:25"),
+                ],
+                # LADDER: restores the "Levels" control AUDIT-MID-2026-07-30 #5
+                # pulled off this card as dead. It is live now — levels split
+                # the side's margin into rungs stepping away from mid, same
+                # total. Curve controls how size is distributed across them.
+                [
+                    InlineKeyboardButton("Levels 1", callback_data="strategy:set:mid:levels:1"),
+                    InlineKeyboardButton("2", callback_data="strategy:set:mid:levels:2"),
+                    InlineKeyboardButton("4", callback_data="strategy:set:mid:levels:4"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:mid:levels"),
+                ],
+                [
+                    InlineKeyboardButton("Curve Flat", callback_data="strategy:set_text:mid:size_curve:flat"),
+                    InlineKeyboardButton("Linear", callback_data="strategy:set_text:mid:size_curve:linear"),
+                    InlineKeyboardButton("Geometric", callback_data="strategy:set_text:mid:size_curve:geometric"),
                 ],
                 [
                     InlineKeyboardButton("30s", callback_data="strategy:set:mid:interval_seconds:30"),
