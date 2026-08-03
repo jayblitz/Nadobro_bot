@@ -408,3 +408,38 @@ def test_curve_never_puts_a_rung_under_the_venue_minimum():
                 f"{curve}/{want}: rung under the venue floor -> client bumps it -> over-deployment"
             )
             assert ladder_notional(plan) == Decimal(100), "sizes must still sum exactly"
+
+
+def test_pre_fill_exposure_ceiling_is_one_side_deployment_by_design():
+    """AUDIT-F2, resolved as intended behaviour rather than a defect.
+
+    The cap floor is ONE FULL SIDE DEPLOYMENT, so a flat book can always place
+    its first quote (the MID-FLAT-DEADLOCK the floor exists for). Two properties
+    make that safe, and both are pinned here:
+
+    1. The ladder never widens the ceiling — N rungs sum to exactly the same
+       notional the single pre-ladder quote placed. Mid's pre-fill exposure is
+       therefore UNCHANGED by the ladder at every level count.
+    2. Resting orders are not directional exposure; the cap binds on FILLED
+       inventory, after which the worsening side stops quoting.
+
+    Flooring at one RUNG instead would make Mid deploy 1/levels of what it
+    deploys today and re-open the deadlock — strictly worse.
+    """
+    async def body():
+        totals = {}
+        for levels in (1, 2, 4):
+            ad = BookAdapter("100.00", "100.10", min_notional="1")
+            orch, c = _mm(ad, dict(TOUCH, ladder_levels=levels, ladder_step_bp="10",
+                                   margin_quote="1000", max_net_exposure_pct="30"))
+            await orch.spawn_controller(c)
+            await orch.tick_controller(c.id)
+            totals[levels] = sum(
+                o.amount_base * o.price for o in ad.placed if o.side is TradeType.BUY
+            )
+        assert totals[1] == totals[2] == totals[4], (
+            f"ladder changed the pre-fill ceiling: {totals}"
+        )
+        assert abs(totals[1] - Decimal(1000)) < Decimal("0.01"), totals
+
+    asyncio.run(body())

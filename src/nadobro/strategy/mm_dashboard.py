@@ -260,11 +260,45 @@ def build_pretrade_breakdown(
         "taker_rate_bps": _bps(taker_rate_fraction) if taker_rate_fraction is not None else None,
         "margin": margin_breakdown,
         "capacity": capacity,
-        "pov": pov_meta,
+        "pov": _annotate_pov(pov_meta, notional_usd, leverage, pair_24h_volume_usd),
         "fees": fees,
         "max_loss_usd": max_loss_usd,
         "sl_pct": sl_pct,
     }
+
+
+def _annotate_pov(
+    pov_meta: Optional[dict],
+    notional_usd: float,
+    leverage: float,
+    pair_24h_volume_usd: Optional[float],
+) -> Optional[dict]:
+    """Attach a ``pacing_note`` saying WHY the cycle is the size it is.
+
+    AUDIT-F7: below the throughput floor the participation preset is
+    inoperative — every preset yields the same cycle, the whole deployed budget
+    — so rendering "POV passive" on its own told the user a rate the bot is not
+    running. Grid ships $75 margin and Mid $100, i.e. essentially every retail
+    session lands here.
+    """
+    if not pov_meta:
+        return pov_meta
+    deployed = max(0.0, float(notional_usd or 0.0)) * max(1.0, float(leverage or 1.0))
+    cycle = float(pov_meta.get("cycle_notional_usd") or 0.0)
+    raw = (
+        float(pov_meta.get("multiplier") or 0.0)
+        * (max(0.0, float(pair_24h_volume_usd or 0.0)) / 1440.0)
+        * (float(pov_meta.get("interval_seconds") or 60) / 60.0)
+    )
+    note = ""
+    if deployed > 0 and cycle >= deployed - 1e-9:
+        note = (
+            f" — preset inoperative: capped at 100% of the ${deployed:,.0f} deployment "
+            f"per cycle (raw rate would be ${raw:,.2f})"
+        )
+    elif cycle > raw + 1e-9:
+        note = f" — floored up from ${raw:,.2f} for throughput"
+    return {**pov_meta, "pacing_note": note, "raw_cycle_usd": raw, "deployed_usd": deployed}
 
 
 def render_pretrade_card_lines(breakdown: dict) -> list[str]:
@@ -307,6 +341,7 @@ def render_pretrade_card_lines(breakdown: dict) -> list[str]:
             f"POV {pov['preset']}: {pov['multiplier'] * 100:.0f}%/min, "
             f"~{pov['duration_minutes']:.1f} min duration, "
             f"cycle ${pov['cycle_notional_usd']:,.2f} every {pov['interval_seconds']}s"
+            f"{pov.get('pacing_note', '')}"
         )
     return lines
 

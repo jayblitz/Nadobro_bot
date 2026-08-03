@@ -121,7 +121,22 @@ class FillAnchoredQuotingController(MarketMakingController):
 
     # -- fill anchoring -----------------------------------------------------
     def _absorb_fills(self) -> None:
-        """Re-anchor on every child quote that terminated FILLED."""
+        """Re-anchor on every child quote that terminated FILLED.
+
+        EXIT fills are excluded (AUDIT-F9). ``_fills`` is the *exposure* window —
+        the price at which the book took ON risk — and the reduce-only actions
+        (the rgrid take-profit, the grid stall concession) are risk REMOVAL at
+        whatever the market offered. Feeding them back in dragged the VWAP
+        toward the exit price, which broke the momentum path twice over: the
+        take-profit measured its excursion from a number that included its own
+        prior closes, and the entry trigger, referenced to that same dragged
+        VWAP, re-bought within a tick of the price it had just sold — two taker
+        legs (~8.6bp round trip) for zero directional edge, every cycle.
+
+        Ordinary maker round trips are NOT exits in this sense: a grid sell that
+        happens to close a long is the strategy working, and must re-anchor.
+        Only orders explicitly tagged ``PositionAction.CLOSE`` are skipped.
+        """
         from src.nadobro.engine.adapter.base import OrderState
 
         for ex in self.my_executors(active_only=False):
@@ -131,6 +146,8 @@ class FillAnchoredQuotingController(MarketMakingController):
             if order is None or order.state is not OrderState.FILLED:
                 continue
             self._seen_filled.add(ex.id)
+            if getattr(getattr(ex, "config", None), "position_action", None) is PositionAction.CLOSE:
+                continue    # exit fill: inventory absorbs it, the anchor must not
             base = abs(_dec(order.filled_base))
             quote = abs(_dec(order.filled_quote))
             if base <= 0:
@@ -216,8 +233,26 @@ class FillAnchoredQuotingController(MarketMakingController):
         if self._taker_in_flight():
             return
         # TAKE PROFIT (momentum): bank the move before considering another add.
-        if await self._maybe_take_profit(mid):
+        tp = await self._maybe_take_profit(mid)
+        if tp == "fired":
             return
+        if tp == "failed":
+            # AUDIT-F8: a close we could not place must NOT fall through into the
+            # add branch. Treating "could not exit" as "no signal" would let the
+            # same tick pile MORE risk onto a position we just failed to reduce.
+            logger.warning(
+                "rgrid: take-profit close was refused — skipping the add branch "
+                "this tick (user=%s pair=%s)", self.user_id, self.trading_pair,
+            )
+            return
+        # RE-ARM (AUDIT-F9): flat again after banking a position. The exposure
+        # window still holds the OLD entries, whose VWAP sits far from the new
+        # mid — enough on its own to breach the band and re-enter within a tick
+        # of the exit. A flat book has no exposure price, so reset the anchor to
+        # mid and require a genuine fresh break, exactly as at session start.
+        if self._net_base() == 0 and self._fills:
+            self._fills.clear()
+            self._reference = mid
         band = max(self.spread_ask_pct, self.spread_floor_half_pct)
         ref = self._exposure_vwap() or self._reference or mid
         if ref <= 0:
@@ -230,7 +265,7 @@ class FillAnchoredQuotingController(MarketMakingController):
         elif mid <= sell_trigger and allow_sell:
             await self._fire_taker(TradeType.SELL, mid)
 
-    async def _maybe_take_profit(self, mid: Decimal) -> bool:
+    async def _maybe_take_profit(self, mid: Decimal) -> str:
         """Momentum take-profit — the RGrid "TP reset threshold", finally live.
 
         ``reset_threshold_pct`` was entirely DEAD on this path: ``on_tick``
@@ -247,10 +282,15 @@ class FillAnchoredQuotingController(MarketMakingController):
         So: once the position's FAVOURABLE excursion from the exposure price
         reaches the threshold, close it reduce-only and let the band re-arm a
         fresh entry. Reduce-only, so this can never open or flip a position.
-        Returns True when an order was fired.
+
+        Returns ``"none"`` (no signal — the caller may consider adding),
+        ``"fired"`` (close placed) or ``"failed"`` (a close was WANTED but could
+        not be placed). The caller must not treat "failed" as "none": adding
+        risk in the same tick we failed to shed it is the wrong default for a
+        safety action (AUDIT-F8).
         """
         if self.reset_threshold_pct <= 0:
-            return False
+            return "none"
         # A profit target INSIDE the entry band is not a target — the position
         # would be closed before the break that opened it is even established,
         # turning a trend follower into a scalper. rgrid ships a 0.125%
@@ -258,17 +298,21 @@ class FillAnchoredQuotingController(MarketMakingController):
         # than the 0.1% entry band, so require clear separation before acting.
         band = max(self.spread_ask_pct, self.spread_floor_half_pct)
         if self.reset_threshold_pct < band * Decimal(2):
-            return False
+            return "none"
         net = self._net_base()
         if net == 0 or mid <= 0:
-            return False
-        entry = self._exposure_vwap() or self._reference
+            return "none"
+        # Cost basis, NOT the raw exposure VWAP: _absorb_fills now excludes exit
+        # fills, and inventory's breakeven (avg buy for a long / avg sell for a
+        # short) is the position's own entry price by construction. Fall back to
+        # the exposure window only when inventory is unavailable.
+        entry = self._position_entry_price() or self._exposure_vwap() or self._reference
         if entry is None or entry <= 0:
-            return False
+            return "none"
         # Favourable direction depends on which way we are positioned.
         excursion = ((mid - entry) / entry) if net > 0 else ((entry - mid) / entry)
         if excursion < self.reset_threshold_pct:
-            return False
+            return "none"
         side = TradeType.SELL if net > 0 else TradeType.BUY
         oc = OrderExecutorConfig(
             self.trading_pair, side, abs(net), ExecutionStrategy.MARKET,
@@ -282,7 +326,7 @@ class FillAnchoredQuotingController(MarketMakingController):
         if not await self.spawn_executor(
             ex, ExecutorRequest(order_amount_quote=abs(net) * mid)
         ):
-            return False
+            return "failed"
         self._pending_taker_id = ex.id
         logger.info(
             "rgrid take-profit: %s%% excursion from exposure %s reached the %s%% "
@@ -291,7 +335,20 @@ class FillAnchoredQuotingController(MarketMakingController):
             round(float(self.reset_threshold_pct) * 100, 3),
             side.name, abs(net), self.user_id, self.trading_pair,
         )
-        return True
+        return "fired"
+
+    def _position_entry_price(self) -> Optional[Decimal]:
+        """The open position's own cost basis from inventory — avg BUY price for
+        a long, avg SELL price for a short. Exits never enter this number, which
+        is what makes it a trustworthy reference for a profit target."""
+        if self.inventory is None:
+            return None
+        try:
+            hold = self.inventory.get(self.user_id, self.trading_pair, self.id)
+            be = hold.breakeven
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(fall back to the exposure window)
+            return None
+        return be if (be is not None and be > 0) else None
 
     def _current_reference(self, mid: Decimal) -> Decimal:
         if self.mode == "rgrid":

@@ -262,3 +262,51 @@ def test_no_tread_branding_in_any_user_facing_string():
                 if "tread" in low and "thread" not in low:
                     offenders.append(f"{path}:{node.lineno}: {node.value[:60]}")
     assert not offenders, "third-party name in user-facing strings:\n" + "\n".join(offenders)
+
+
+# ==========================================================================
+# AUDIT-F7 / F11 — the card must not describe a plan that is not the plan
+# ==========================================================================
+def test_ladder_line_shows_the_real_curved_sizes_not_a_flat_average():
+    """AUDIT-F11: it printed deployed/levels for EVERY curve. On geometric/4 at
+    $100 it claimed '4 x $25 each' when the plan is $6.67 … $53.33 — and $6.67
+    is precisely the rung the venue-minimum clamp acts on."""
+    base = {"notional_usd": 100.0, "levels": 4, "mm_leverage_override": 1}
+    flat = sh._ladder_line({**base, "size_curve": "flat"})
+    geo = sh._ladder_line({**base, "size_curve": "geometric"})
+    assert "$25" in flat, flat
+    assert "$25" not in geo, f"geometric still reports the flat average: {geo}"
+    assert "$7" in geo and "$53" in geo, geo
+
+
+def test_ladder_line_surfaces_the_venue_minimum_clamp():
+    """A clamp the user cannot see is a silent truncation: they ask for 8 rungs,
+    get 1, and nothing on the card says so."""
+    line = sh._ladder_line({
+        "notional_usd": 100.0, "levels": 8, "mm_leverage_override": 1,
+        "size_curve": "geometric", "product": "BTC-PERP",
+    })
+    assert "Capped at" in line, line
+    assert "8" in line and "venue minimum" in line, line
+
+
+def test_pov_line_admits_when_the_preset_is_inoperative():
+    """AUDIT-F7: below the throughput floor every preset yields the same cycle —
+    the whole deployed budget — so the preset name alone stated a rate the bot
+    is not running. Grid ships $75 margin and Mid $100, so this is the norm."""
+    from src.nadobro.strategy.mm_dashboard import _annotate_pov
+
+    meta = {"preset": "passive", "multiplier": 0.01, "duration_minutes": 1.0,
+            "cycle_notional_usd": 100.0, "interval_seconds": 45}
+    capped = _annotate_pov(dict(meta), 100.0, 1.0, 1_000_000.0)
+    assert "inoperative" in capped["pacing_note"], capped["pacing_note"]
+
+    floored = _annotate_pov({**meta, "cycle_notional_usd": 1000.0}, 4900.0, 1.0, 1_000_000.0)
+    assert "floored up" in floored["pacing_note"], floored["pacing_note"]
+
+    # A pair deep enough that the raw rate stands on its own: no note at all.
+    vol = 1_920_000_000.0
+    raw = 0.01 * (vol / 1440.0) * (45.0 / 60.0)
+    honest = _annotate_pov({**meta, "multiplier": 0.01, "cycle_notional_usd": raw},
+                           10_000_000.0, 1.0, vol)
+    assert honest["pacing_note"] == "", honest["pacing_note"]

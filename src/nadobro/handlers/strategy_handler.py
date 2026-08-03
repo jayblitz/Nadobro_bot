@@ -1641,15 +1641,47 @@ def _ladder_line(conf: dict) -> str:
     on: the planner drops levels whose size falls under the product floor, so a
     user picking 8 levels on a small margin needs to see each rung shrink. The
     total never changes — levels redistribute the same deployment.
+
+    AUDIT-F11: this used to print ``deployed / levels`` — the FLAT size — for
+    every curve. On geometric/4 at $100 it claimed "4 × $25 each" when the plan
+    is $6.67 / $13.33 / $26.67 / $53.33, and it could not show the level count
+    being cut by the venue minimum at all. Ask the planner instead of dividing.
     """
+    from decimal import Decimal as _D
+
+    from src.nadobro.quant.ladder import plan_ladder
+
     levels = max(1, int(conf.get("levels", 2) or 2))
     deployed = _effective_margin_usd(conf) * _mm_effective_leverage(conf)
-    per_level = deployed / levels if levels > 0 else deployed
-    curve = str(conf.get("size_curve") or "flat").upper()
-    shape = "" if curve == "FLAT" else " \\(deeper rungs larger\\)"
+    curve = str(conf.get("size_curve") or "flat").lower()
+    min_notional = 0.0
+    product = str(conf.get("product") or "")
+    if product:
+        try:
+            from src.nadobro.venue.product_catalog import get_product_min_quote_notional_usd
+
+            min_notional = float(get_product_min_quote_notional_usd(product) or 0.0)
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(no catalog -> no clamp preview)
+            min_notional = 0.0
+    plan = plan_ladder(
+        _D(str(deployed)), levels=levels, step_bp=1, curve=curve,
+        min_notional=_D(str(min_notional)),
+    )
+    if not plan:
+        return f"Levels: *{escape_md(str(levels))}* \\| Curve: *{escape_md(curve.upper())}*"
+    sizes = [float(lv.size_quote) for lv in plan]
+    if len({f"{s:.2f}" for s in sizes}) == 1:
+        size_str = f"*{escape_md(f'${sizes[0]:,.0f}')}* each"
+    else:
+        size_str = f"*{escape_md(f'${sizes[0]:,.0f}')}*→*{escape_md(f'${sizes[-1]:,.0f}')}* \\(near→deep\\)"
+    clamped = (
+        f"\n⚠️ Capped at *{escape_md(str(len(plan)))}* of {escape_md(str(levels))} levels "
+        f"by the {escape_md(f'${min_notional:,.0f}')} venue minimum\\."
+        if len(plan) < levels else ""
+    )
     return (
-        f"Levels: *{escape_md(str(levels))}* × *{escape_md(f'${per_level:,.0f}')}* each "
-        f"\\| Curve: *{escape_md(curve)}*{shape}"
+        f"Levels: *{escape_md(str(len(plan)))}* × {size_str} "
+        f"\\| Curve: *{escape_md(curve.upper())}*{clamped}"
     )
 
 
@@ -1761,9 +1793,12 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             return (
                 "⚙️ *GRID · Risk*\n\n"
                 f"PnL TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}* of margin\n\n"
-                "Judged NET of fees on live PnL including unrealised\\. Underneath, the "
-                "net\\-exposure cap suppresses whichever side worsens exposure, and a "
-                "bounded reduce\\-only concession unsticks a stalled soft reset\\."
+                "Judged NET of fees on live PnL including unrealised\\.\n\n"
+                "The net\\-exposure cap governs FILLED inventory: once a side is "
+                "over the cap only the reducing side keeps quoting\\. Resting "
+                "orders are not capped below one full deployment — a bid and an "
+                "ask net to zero, and refusing the first quote would leave a flat "
+                "book unable to start\\. Your margin is the hard ceiling\\."
             )
         pov_label = str(conf.get("participation_preset") or "OFF").upper()
         # Grid runs one of TWO controllers and the card must not describe the
