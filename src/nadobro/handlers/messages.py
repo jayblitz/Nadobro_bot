@@ -1641,7 +1641,12 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "notional_usd": (1, 1000000),
         "spread_bp": (spread_lo, spread_hi),
         "directional_bias": (-1.0, 1.0),
-        "interval_seconds": (10, 3600),
+        # Floor 5, matching the button path. It was 10 here, which silently
+        # rejected a typed "5" while the 5s PRESET tapped fine — and the button
+        # path's own comment says floor 5 exists so Turbo's 5s cadence can be
+        # re-entered MANUALLY, which this dict was preventing. The engine
+        # hard-floors everything at 3s (core/cadence.effective_interval_seconds).
+        "interval_seconds": (5, 3600),
         "tp_pct": (0.05, 100),
         "sl_pct": (0.05, 100),
         "levels": (1, 20),

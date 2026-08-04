@@ -109,3 +109,49 @@ def test_the_validator_actually_catches_a_bad_string():
     assert markdown_v2_errors("value: 1.5")                          # bare dot
     assert markdown_v2_errors("*unbalanced")                         # dangling bold
     assert not markdown_v2_errors(r"Auto\-close: *ON* at 1\.5%")     # correct
+
+
+# ==========================================================================
+# Validator parity (self-audit 2026-08-03)
+# ==========================================================================
+def _limit_table(source: str) -> dict:
+    """Parse a ``limits = { "field": (lo, hi), ... }`` block."""
+    import re as _re
+
+    body = source.split("limits = {", 1)[1]
+    out = {}
+    for line in body.splitlines():
+        m = _re.match(r'\s*"([a-z0-9_]+)":\s*\(([^)]+)\)\s*,', line)
+        if m:
+            try:
+                lo, hi = (float(x.strip()) for x in m.group(2).split(","))
+            except ValueError:
+                continue
+            out[m.group(1)] = (lo, hi)
+        elif line.strip().startswith("}"):
+            break
+    return out
+
+
+def test_button_and_typed_validators_agree_on_every_shared_field():
+    """A strategy setting has TWO independent validators: the inline-button path
+    in strategy_handler and the typed-reply path in messages.py. When they
+    disagree, a value you can TAP is rejected when TYPED (or the reverse) — and
+    both failures are silent, the input is simply dropped with no feedback.
+
+    Found by this check: ``interval_seconds`` allowed 5 by button and 10 by
+    typing, which defeated the button path's own documented reason for the
+    floor ("so Turbo's 5s cadence can be re-entered manually").
+    """
+    from src.nadobro.handlers import messages as msg
+    from src.nadobro.handlers import strategy_handler as sh_
+
+    buttons = _limit_table(open(sh_.__file__).read())
+    typed = _limit_table(open(msg.__file__).read())
+    shared = set(buttons) & set(typed)
+    assert len(shared) > 20, f"parser drifted — only {len(shared)} shared fields found"
+    mismatched = {k: (buttons[k], typed[k]) for k in sorted(shared) if buttons[k] != typed[k]}
+    assert not mismatched, (
+        "validators disagree (button bounds vs typed bounds):\n"
+        + "\n".join(f"  {k}: {v[0]} vs {v[1]}" for k, v in mismatched.items())
+    )
