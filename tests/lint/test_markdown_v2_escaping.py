@@ -33,17 +33,42 @@ def markdown_v2_errors(text: str) -> list[tuple[int, str, str]]:
 
     ``*`` is permitted as a bold delimiter but must be balanced — an odd count
     leaves an unterminated entity, which Telegram also rejects.
+
+    CODE ENTITIES are skipped: inside ``code``/``pre`` only a backtick and a
+    backslash are special, so a hex key or an address sitting in a code span is
+    correct precisely BECAUSE it is unescaped. Treating those as errors would
+    push callers toward escape_md inside code blocks, which is the bug this
+    file exists to catch — literal backslashes in text the user copies.
     """
     errors: list[tuple[int, str, str]] = []
-    i = 0
+    i, n = 0, len(text)
     bold_open = False
-    while i < len(text):
+    italic_open = False
+    while i < n:
         ch = text[i]
         if ch == "\\":
             i += 2                      # escaped: consume the pair
             continue
+        if text.startswith("```", i):   # pre block: skip to its closing fence
+            end = text.find("```", i + 3)
+            if end == -1:
+                errors.append((i, "`", "unterminated ``` pre block"))
+                break
+            i = end + 3
+            continue
+        if ch == "`":                   # inline code: skip to its closing tick
+            end = text.find("`", i + 1)
+            if end == -1:
+                errors.append((i, "`", "unterminated inline code span"))
+                break
+            i = end + 1
+            continue
         if ch == "*":
             bold_open = not bold_open
+            i += 1
+            continue
+        if ch == "_":                   # italic delimiter, same rule as bold
+            italic_open = not italic_open
             i += 1
             continue
         if ch in SPECIAL:
@@ -52,6 +77,8 @@ def markdown_v2_errors(text: str) -> list[tuple[int, str, str]]:
         i += 1
     if bold_open:
         errors.append((-1, "*", "unbalanced bold delimiter"))
+    if italic_open:
+        errors.append((-1, "_", "unbalanced italic delimiter"))
     return errors
 
 
@@ -108,6 +135,8 @@ def test_the_validator_actually_catches_a_bad_string():
     assert markdown_v2_errors("Auto-close on maintenance")          # bare hyphen
     assert markdown_v2_errors("value: 1.5")                          # bare dot
     assert markdown_v2_errors("*unbalanced")                         # dangling bold
+    assert markdown_v2_errors("_dangling")                           # dangling italic
+    assert markdown_v2_errors("visit x?join=y")                      # bare = (the wallet bug)
     assert not markdown_v2_errors(r"Auto\-close: *ON* at 1\.5%")     # correct
 
 
@@ -155,3 +184,54 @@ def test_button_and_typed_validators_agree_on_every_shared_field():
         "validators disagree (button bounds vs typed bounds):\n"
         + "\n".join(f"  {k}: {v[0]} vs {v[1]}" for k, v in mismatched.items())
     )
+
+
+# ==========================================================================
+# Wallet cards — the highest-consequence text in the bot
+# ==========================================================================
+def test_wallet_cards_are_valid_markdown_v2():
+    """The connect card carries the 1CT private key. If Telegram rejects the
+    message it falls back to PLAIN TEXT, which strips the code block — and with
+    it the copy affordance the user needs to complete setup."""
+    from src.nadobro.handlers import formatters as f
+
+    pk = "0x" + "ab" * 32
+    cards = {
+        "wallet_connect": f.fmt_wallet_connect_card(pk),
+        "wallet_balance": f.fmt_wallet_balance_card(1234.5),
+        "wallet_balance_error": f.fmt_wallet_balance_error(),
+        "wallet_revoke_steps": f.fmt_wallet_revoke_steps_card(),
+    }
+    for name, text in cards.items():
+        errors = markdown_v2_errors(text)
+        assert not errors, f"{name}: {errors[:5]}"
+
+
+def test_the_private_key_is_copyable_and_byte_exact():
+    """Two properties the user's setup depends on: the key sits in a code
+    entity (so Telegram offers copy), and what they copy is EXACTLY the key —
+    no escaping artefacts. escape_md inside a code block would silently corrupt
+    it, and a corrupted 1CT key fails on Nado with no useful error."""
+    import re as _re
+
+    from src.nadobro.handlers import formatters as f
+
+    pk = "0x" + "cd" * 32
+    card = f.fmt_wallet_connect_card(pk)
+    block = _re.search(r"```\n(.*?)\n```", card, _re.S)
+    assert block, "the key is not in a pre block — no copy button"
+    assert block.group(1) == pk, f"copied text is not the key: {block.group(1)!r}"
+    assert "\\" not in block.group(1), "escaping artefact inside the copy payload"
+
+
+def test_escape_md_code_escapes_only_what_telegram_treats_as_special():
+    from src.nadobro.handlers.formatters import escape_md, escape_md_code
+
+    # Inside a code entity these are LITERAL and must not gain backslashes.
+    for ch in "_*[]()~>#+-=|{}.!":
+        assert escape_md_code(f"a{ch}b") == f"a{ch}b", ch
+        assert escape_md(f"a{ch}b") != f"a{ch}b", f"escape_md should escape {ch}"
+    # These two genuinely are special inside a code entity.
+    assert escape_md_code("a`b") == "a\\`b"
+    assert escape_md_code("a\\b") == "a\\\\b"
+    assert escape_md_code(None) == ""

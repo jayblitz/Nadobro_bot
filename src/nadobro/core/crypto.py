@@ -92,7 +92,12 @@ def derive_address_from_private_key(private_key: str) -> str:
 
 def normalize_private_key(private_key: str) -> str:
     raw = (private_key or "").strip()
-    if raw.startswith("0x"):
+    # Case-INSENSITIVE prefix: some tooling emits "0X". A case-sensitive check
+    # left the prefix attached, so the string was 66 chars and the regex below
+    # rejected it as "Expected 64 hex chars" — a misleading error for a key that
+    # is perfectly valid. Latent today (this helper has no live caller), fixed
+    # so wiring it to a paste path later cannot resurrect it.
+    if raw[:2].lower() == "0x":
         raw = raw[2:]
     if not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
         raise ValueError("Invalid private key format. Expected 64 hex chars.")
