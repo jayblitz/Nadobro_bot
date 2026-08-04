@@ -1641,7 +1641,12 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "notional_usd": (1, 1000000),
         "spread_bp": (spread_lo, spread_hi),
         "directional_bias": (-1.0, 1.0),
-        "interval_seconds": (10, 3600),
+        # Floor 5, matching the button path. It was 10 here, which silently
+        # rejected a typed "5" while the 5s PRESET tapped fine — and the button
+        # path's own comment says floor 5 exists so Turbo's 5s cadence can be
+        # re-entered MANUALLY, which this dict was preventing. The engine
+        # hard-floors everything at 3s (core/cadence.effective_interval_seconds).
+        "interval_seconds": (5, 3600),
         "tp_pct": (0.05, 100),
         "sl_pct": (0.05, 100),
         "levels": (1, 20),
@@ -1656,12 +1661,15 @@ async def _handle_pending_strategy_input(update, context, telegram_id, text):
         "min_spread_bp": (0.1, 200),
         "max_spread_bp": (0.1, 500),
         "vol_sensitivity": (0.0, 1.0),
-        "grid_reset_threshold_pct": (0.05, 20),
+        # Soft-reset drift band: grid re-anchors on small drifts (1% ceiling);
+        # rgrid follows trends and needs a far wider band. Must match the
+        # button path in strategy_handler.py or the two disagree.
+        "grid_reset_threshold_pct": (0.05, 1.0),
         "grid_reset_timeout_seconds": (15, 86400),
         "rgrid_spread_bp": (0.1, 200),
         "rgrid_stop_loss_pct": (0.05, 100),
         "rgrid_take_profit_pct": (0.05, 200),
-        "rgrid_reset_threshold_pct": (0.05, 20),
+        "rgrid_reset_threshold_pct": (0.1, 10.0),
         "rgrid_reset_timeout_seconds": (15, 86400),
         "rgrid_discretion": (0.01, 0.5),
         "dgrid_trend_on_variance_ratio": (1.0, 5.0),

@@ -121,7 +121,22 @@ class FillAnchoredQuotingController(MarketMakingController):
 
     # -- fill anchoring -----------------------------------------------------
     def _absorb_fills(self) -> None:
-        """Re-anchor on every child quote that terminated FILLED."""
+        """Re-anchor on every child quote that terminated FILLED.
+
+        EXIT fills are excluded (AUDIT-F9). ``_fills`` is the *exposure* window —
+        the price at which the book took ON risk — and the reduce-only actions
+        (the rgrid take-profit, the grid stall concession) are risk REMOVAL at
+        whatever the market offered. Feeding them back in dragged the VWAP
+        toward the exit price, which broke the momentum path twice over: the
+        take-profit measured its excursion from a number that included its own
+        prior closes, and the entry trigger, referenced to that same dragged
+        VWAP, re-bought within a tick of the price it had just sold — two taker
+        legs (~8.6bp round trip) for zero directional edge, every cycle.
+
+        Ordinary maker round trips are NOT exits in this sense: a grid sell that
+        happens to close a long is the strategy working, and must re-anchor.
+        Only orders explicitly tagged ``PositionAction.CLOSE`` are skipped.
+        """
         from src.nadobro.engine.adapter.base import OrderState
 
         for ex in self.my_executors(active_only=False):
@@ -131,6 +146,8 @@ class FillAnchoredQuotingController(MarketMakingController):
             if order is None or order.state is not OrderState.FILLED:
                 continue
             self._seen_filled.add(ex.id)
+            if getattr(getattr(ex, "config", None), "position_action", None) is PositionAction.CLOSE:
+                continue    # exit fill: inventory absorbs it, the anchor must not
             base = abs(_dec(order.filled_base))
             quote = abs(_dec(order.filled_quote))
             if base <= 0:
@@ -215,16 +232,123 @@ class FillAnchoredQuotingController(MarketMakingController):
         # absorbed into the exposure VWAP) before considering the next step.
         if self._taker_in_flight():
             return
+        # TAKE PROFIT (momentum): bank the move before considering another add.
+        tp = await self._maybe_take_profit(mid)
+        if tp == "fired":
+            return
+        if tp == "failed":
+            # AUDIT-F8: a close we could not place must NOT fall through into the
+            # add branch. Treating "could not exit" as "no signal" would let the
+            # same tick pile MORE risk onto a position we just failed to reduce.
+            logger.warning(
+                "rgrid: take-profit close was refused — skipping the add branch "
+                "this tick (user=%s pair=%s)", self.user_id, self.trading_pair,
+            )
+            return
+        # RE-ARM (AUDIT-F9): flat again after banking a position. The exposure
+        # window still holds the OLD entries, whose VWAP sits far from the new
+        # mid — enough on its own to breach the band and re-enter within a tick
+        # of the exit. A flat book has no exposure price, so reset the anchor to
+        # mid and require a genuine fresh break, exactly as at session start.
+        if self._net_base() == 0 and self._fills:
+            self._fills.clear()
+            self._reference = mid
         band = max(self.spread_ask_pct, self.spread_floor_half_pct)
         ref = self._exposure_vwap() or self._reference or mid
         if ref <= 0:
             return
+        self._last_ref = ref
         buy_trigger = ref * (Decimal(1) + band)
         sell_trigger = ref * (Decimal(1) - band)
         if mid >= buy_trigger and allow_buy:
             await self._fire_taker(TradeType.BUY, mid)
         elif mid <= sell_trigger and allow_sell:
             await self._fire_taker(TradeType.SELL, mid)
+
+    async def _maybe_take_profit(self, mid: Decimal) -> str:
+        """Momentum take-profit — the RGrid "TP reset threshold", finally live.
+
+        ``reset_threshold_pct`` was entirely DEAD on this path: ``on_tick``
+        hands off to ``_tick_momentum`` and returns before any reset logic runs,
+        so the user's RGrid setting changed nothing at all.
+
+        It cannot mean grid's soft reset here. Grid re-anchors to mid when price
+        DRIFTS from the reference — but in momentum a drift IS the entry signal,
+        so re-anchoring on drift suppresses the very break the strategy exists
+        to trade (proved by the momentum entry tests). What the threshold means
+        for a trend follower is the profit target: momentum added into the move
+        and had no way to bank it, only a reversal exit at ±band.
+
+        So: once the position's FAVOURABLE excursion from the exposure price
+        reaches the threshold, close it reduce-only and let the band re-arm a
+        fresh entry. Reduce-only, so this can never open or flip a position.
+
+        Returns ``"none"`` (no signal — the caller may consider adding),
+        ``"fired"`` (close placed) or ``"failed"`` (a close was WANTED but could
+        not be placed). The caller must not treat "failed" as "none": adding
+        risk in the same tick we failed to shed it is the wrong default for a
+        safety action (AUDIT-F8).
+        """
+        if self.reset_threshold_pct <= 0:
+            return "none"
+        # A profit target INSIDE the entry band is not a target — the position
+        # would be closed before the break that opened it is even established,
+        # turning a trend follower into a scalper. rgrid ships a 0.125%
+        # threshold sized for the maker path's soft reset, which is narrower
+        # than the 0.1% entry band, so require clear separation before acting.
+        band = max(self.spread_ask_pct, self.spread_floor_half_pct)
+        if self.reset_threshold_pct < band * Decimal(2):
+            return "none"
+        net = self._net_base()
+        if net == 0 or mid <= 0:
+            return "none"
+        # Cost basis, NOT the raw exposure VWAP: _absorb_fills now excludes exit
+        # fills, and inventory's breakeven (avg buy for a long / avg sell for a
+        # short) is the position's own entry price by construction. Fall back to
+        # the exposure window only when inventory is unavailable.
+        entry = self._position_entry_price() or self._exposure_vwap() or self._reference
+        if entry is None or entry <= 0:
+            return "none"
+        # Favourable direction depends on which way we are positioned.
+        excursion = ((mid - entry) / entry) if net > 0 else ((entry - mid) / entry)
+        if excursion < self.reset_threshold_pct:
+            return "none"
+        side = TradeType.SELL if net > 0 else TradeType.BUY
+        oc = OrderExecutorConfig(
+            self.trading_pair, side, abs(net), ExecutionStrategy.MARKET,
+            leverage=int(self.cfg("leverage", 1) or 1),
+            position_action=PositionAction.CLOSE,   # reduce-only: never adds/flips
+        )
+        ex = OrderExecutor(
+            oc, user_id=self.user_id, controller_id=self.id,
+            adapter=self.adapter, inventory=self.inventory,
+        )
+        if not await self.spawn_executor(
+            ex, ExecutorRequest(order_amount_quote=abs(net) * mid)
+        ):
+            return "failed"
+        self._pending_taker_id = ex.id
+        logger.info(
+            "rgrid take-profit: %s%% excursion from exposure %s reached the %s%% "
+            "threshold — closing %s %s (user=%s pair=%s)",
+            round(float(excursion) * 100, 3), entry,
+            round(float(self.reset_threshold_pct) * 100, 3),
+            side.name, abs(net), self.user_id, self.trading_pair,
+        )
+        return "fired"
+
+    def _position_entry_price(self) -> Optional[Decimal]:
+        """The open position's own cost basis from inventory — avg BUY price for
+        a long, avg SELL price for a short. Exits never enter this number, which
+        is what makes it a trustworthy reference for a profit target."""
+        if self.inventory is None:
+            return None
+        try:
+            hold = self.inventory.get(self.user_id, self.trading_pair, self.id)
+            be = hold.breakeven
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(fall back to the exposure window)
+            return None
+        return be if (be is not None and be > 0) else None
 
     def _current_reference(self, mid: Decimal) -> Decimal:
         if self.mode == "rgrid":
@@ -277,7 +401,13 @@ class FillAnchoredQuotingController(MarketMakingController):
             self._stall_ticks = 0
             self._last_net_base = net_base
             return
-        dust = abs(self.order_amount_quote / mid) * Decimal("0.01") if mid > 0 else Decimal(0)
+        # LADDER: these thresholds mean "one QUOTE's worth", not one side's
+        # worth. order_amount_quote became the per-side deployment when the
+        # ladder landed, so both must divide by the level count — otherwise the
+        # concession safety valve silently needs `levels`x more stuck exposure
+        # before it fires.
+        level_quote = self.order_amount_quote / Decimal(max(1, self.ladder_levels))
+        dust = abs(level_quote / mid) * Decimal("0.01") if mid > 0 else Decimal(0)
         if abs(net_base) < abs(self._last_net_base) - dust:
             self._stall_ticks = 0           # exposure shrinking — the maker leg is filling
         else:
@@ -289,7 +419,7 @@ class FillAnchoredQuotingController(MarketMakingController):
             return
         # Fee-aware gate: only pay a taker fee to unstick MATERIAL exposure
         # (≥ one quote's notional); let the maker leg handle smaller residue.
-        if abs(net_base) * mid < self.order_amount_quote:
+        if abs(net_base) * mid < level_quote:
             return
         await self._fire_concession(net_base, mid)
         self._stall_ticks = 0               # re-arm; fires again next window if still stuck
@@ -337,12 +467,18 @@ class FillAnchoredQuotingController(MarketMakingController):
         soft_reset = drift > self.reset_threshold_pct
         self._soft_reset_active = bool(soft_reset and self.mode == "grid")
 
+        # Directional bias, applied through the SAME skew Mid uses. Grid inherits
+        # Mid's quoting machinery, so the signal overlay's bias (and the user's
+        # own setting) must steer this book too — previously both were computed
+        # and then silently dropped here. bias=0 is symmetric, i.e. unchanged.
+        spread_bid_pct, spread_ask_pct = self.effective_spreads()
+
         if self.mode != "grid":
             # rgrid maker (non-momentum): symmetric re-anchor to mid on drift,
             # no no-cross (the quotes follow the trend).
             anchor = mid if soft_reset else ref
-            target_bid = anchor * (Decimal(1) - self.spread_bid_pct)
-            target_ask = anchor * (Decimal(1) + self.spread_ask_pct)
+            target_bid = anchor * (Decimal(1) - spread_bid_pct)
+            target_ask = anchor * (Decimal(1) + spread_ask_pct)
         elif soft_reset:
             # SOFT RESET (drift escaped the band): re-anchor BOTH legs to mid so
             # neither is stranded across it, then DROP the no-cross clamp on the
@@ -350,29 +486,32 @@ class FillAnchoredQuotingController(MarketMakingController):
             # below cost (the documented "switch the behind leg to mid-market"
             # circuit-breaker). The profit/flat leg keeps no-cross, so it never
             # adds at a loss. net long ⇒ SELL behind; net short ⇒ BUY behind.
-            target_bid = mid * (Decimal(1) - self.spread_bid_pct)
-            target_ask = mid * (Decimal(1) + self.spread_ask_pct)
+            target_bid = mid * (Decimal(1) - spread_bid_pct)
+            target_ask = mid * (Decimal(1) + spread_ask_pct)
             sell_behind = base_value > 0
             buy_behind = base_value < 0
             if not buy_behind and self._last_sell_px is not None:
-                target_bid = min(target_bid, self._last_sell_px * (Decimal(1) - self.spread_bid_pct))
+                target_bid = min(target_bid, self._last_sell_px * (Decimal(1) - spread_bid_pct))
             if not sell_behind and self._last_buy_px is not None:
-                target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + self.spread_ask_pct))
+                target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + spread_ask_pct))
         else:
             # Normal grid: both legs at the last-fill reference with the full
             # no-cross invariant — never buy above the last sell, never sell below
             # the last buy (every round trip captures spread).
-            target_bid = ref * (Decimal(1) - self.spread_bid_pct)
-            target_ask = ref * (Decimal(1) + self.spread_ask_pct)
+            target_bid = ref * (Decimal(1) - spread_bid_pct)
+            target_ask = ref * (Decimal(1) + spread_ask_pct)
             if self._last_sell_px is not None:
-                target_bid = min(target_bid, self._last_sell_px * (Decimal(1) - self.spread_bid_pct))
+                target_bid = min(target_bid, self._last_sell_px * (Decimal(1) - spread_bid_pct))
             if self._last_buy_px is not None:
-                target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + self.spread_ask_pct))
+                target_ask = max(target_ask, self._last_buy_px * (Decimal(1) + spread_ask_pct))
 
         # Forward the same mark used for exposure decisions. The inherited
-        # reconciler projects the next quote against the exposure cap.
-        await self._reconcile(TradeType.BUY, target_bid, allow_buy, mid)
-        await self._reconcile(TradeType.SELL, target_ask, allow_sell, mid)
+        # reconciler projects each quote against the exposure cap. With
+        # ladder_levels > 1 this rests N levels per side stepping away from the
+        # anchor (scaling in/out) instead of the single order that used to sit
+        # there until it filled; the per-side total is unchanged either way.
+        await self._quote_side(TradeType.BUY, target_bid, allow_buy, mid)
+        await self._quote_side(TradeType.SELL, target_ask, allow_sell, mid)
 
         # Step 2 of the stall escalation: if the soft-reset's maker concession
         # can't rebalance, escalate to a bounded reduce-only taker before SL.

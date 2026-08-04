@@ -92,7 +92,13 @@ def compute_overrides(strategy: str, signal: Signal) -> Dict[str, object]:
         overrides["sl_pct"] = float(signal.sl_pct)
     if signal.tp_pct is not None:
         overrides["tp_pct"] = float(signal.tp_pct)
-    if strat == "mid":
+    # Continuous directional bias. Grid joined Mid here once the ladder landed:
+    # fill-anchored Grid inherits Mid's quoting machinery and now applies the
+    # same bias skew to its per-side spreads, so withholding the signal made
+    # Grid a second-class citizen of the overlay for no reason. rgrid/dgrid are
+    # excluded on purpose — rgrid is taker-momentum (it acts on breaks, not on
+    # a resting spread) and dgrid drives its own regime phase.
+    if strat in ("mid", "grid"):
         overrides["directional_bias"] = _clamp(float(signal.bias), -1.0, 1.0)
     return overrides
 
@@ -210,6 +216,14 @@ def apply_overrides_to_configs(
                 except Exception:  # noqa: BLE001
                     pass
                 changed[key] = str(configs[key])
+        # LADDER: the level spacing is derived from the quoted spread at mapping
+        # time, so widening the spread without widening the step leaves the
+        # levels packed around a quote that has moved out — an internally
+        # inconsistent book. Scale it by the same factor. No fee floor here:
+        # this value is in BASIS POINTS, and clamping it against the spread
+        # floor (a fraction) would be a unit error, not a safety net.
+        if _mul_dec(configs, "ladder_step_bp", spread_factor):
+            changed["ladder_step_bp"] = str(configs["ladder_step_bp"])
 
     if "directional_bias" in overrides:
         configs["directional_bias"] = float(overrides["directional_bias"])

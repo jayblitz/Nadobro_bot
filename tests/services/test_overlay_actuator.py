@@ -95,10 +95,54 @@ def test_spread_fee_floor_enforced():
     assert Decimal(cfg["spread_ask_pct"]) >= Decimal("0.00015")
 
 
-def test_grid_gets_no_directional_bias_key():
-    # directional_bias is a Mid-only continuous knob.
-    ov = oa.compute_overrides("grid", Signal(bias=0.5, regime="trend_up", entry_ok=True, scale=0.3))
-    assert "directional_bias" not in ov
+def test_grid_joins_mid_in_receiving_directional_bias():
+    """Bias used to be Mid-only. Once fill-anchored Grid started applying the
+    same skew to its per-side spreads (it inherits Mid's quoting machinery),
+    withholding the signal made Grid a second-class overlay citizen for no
+    reason. rgrid/dgrid stay excluded: rgrid acts on breaks rather than a
+    resting spread, and dgrid drives its own regime phase."""
+    sig = Signal(bias=0.5, regime="trend_up", entry_ok=True, scale=0.3)
+    for strat in ("mid", "grid"):
+        assert oa.compute_overrides(strat, sig)["directional_bias"] == 0.5, strat
+    for strat in ("rgrid", "dgrid"):
+        assert "directional_bias" not in oa.compute_overrides(strat, sig), strat
+
+
+def test_grid_actually_consumes_the_bias_it_is_given():
+    """A key in the overrides dict proves nothing on its own — the previous
+    Mid-only rule existed because Grid dropped the value. Assert the skew
+    reaches the quoted spreads."""
+    from decimal import Decimal as D
+
+    from src.nadobro.engine.controllers.fill_anchored import FillAnchoredQuotingController
+
+    def _mk(bias):
+        return FillAnchoredQuotingController(
+            user_id=1, controller_id="grid:1:mainnet", orchestrator=object(),
+            adapter=object(), inventory=None,
+            configs={"trading_pair": "P", "spread_bid_pct": "0.001",
+                     "spread_ask_pct": "0.001", "spread_floor_half_pct": "0",
+                     "directional_bias": bias},
+        )
+
+    flat_bid, flat_ask = _mk(0.0).effective_spreads()
+    long_bid, long_ask = _mk(1.0).effective_spreads()
+    assert (flat_bid, flat_ask) == (D("0.001"), D("0.001")), "neutral must be symmetric"
+    assert long_bid < flat_bid, "long bias must tighten the bid (buy sooner)"
+    assert long_ask > flat_ask, "long bias must widen the ask (sell later)"
+
+
+def test_spread_factor_also_widens_the_ladder_step():
+    """The level spacing is derived from the spread at mapping time, so widening
+    the spread without widening the step leaves rungs packed around a quote that
+    has moved out."""
+    cfg = {"spread_bid_pct": Decimal("0.001"), "spread_ask_pct": Decimal("0.001"),
+           "ladder_step_bp": Decimal("10")}
+    oa.apply_overrides_to_configs(
+        "grid", cfg,
+        {"size_factor": 1.0, "spread_factor": 2.0, "suppress_new_entries": False},
+    )
+    assert Decimal(cfg["ladder_step_bp"]) == Decimal("20")
 
 
 def test_signal_barriers_flow_into_overrides_and_grid_barrier():

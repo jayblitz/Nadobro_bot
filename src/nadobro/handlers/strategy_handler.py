@@ -925,12 +925,15 @@ async def _handle_strategy(query, data, context, telegram_id):
             "min_spread_bp": (0.1, 200),
             "max_spread_bp": (0.1, 500),
             "vol_sensitivity": (0.0, 1.0),
-            "grid_reset_threshold_pct": (0.05, 20),
+            # Soft-reset drift band. Grid re-anchors on SMALL drifts (it is a
+            # spread-capture book that must stay near the last fill), so 1% is
+            # the ceiling; RGrid follows trends and needs a much wider band.
+            "grid_reset_threshold_pct": (0.05, 1.0),
             "grid_reset_timeout_seconds": (15, 86400),
             "rgrid_spread_bp": (0.1, 200),
             "rgrid_stop_loss_pct": (0.05, 100),
             "rgrid_take_profit_pct": (0.05, 200),
-            "rgrid_reset_threshold_pct": (0.05, 20),
+            "rgrid_reset_threshold_pct": (0.1, 10.0),
             "rgrid_reset_timeout_seconds": (15, 86400),
             "rgrid_discretion": (0.01, 0.5),
             "dgrid_trend_on_variance_ratio": (1.0, 5.0),
@@ -1006,12 +1009,20 @@ async def _handle_strategy(query, data, context, telegram_id):
             "participation_preset": {"aggressive", "normal", "passive", "off"},
             # Volume Bot execution algo (maker TWAP default / chase / taker).
             "vol_execution_algo": {"twap", "chase", "taker"},
+            # Ladder size curve (Mid + fill-anchored Grid): how the side's
+            # deployment is distributed across levels. flat = equal size;
+            # linear/geometric put progressively more size on the deeper
+            # levels, i.e. scale harder into an adverse move.
+            "size_curve": {"flat", "linear", "geometric"},
         }
         allowed_vals = allowed_text.get(field, set())
         if raw_value not in allowed_vals:
             return
         # participation_preset is only meaningful for the MM family.
         if field == "participation_preset" and strategy_id not in ("grid", "rgrid", "dgrid", "mid"):
+            return
+        # size_curve only drives the laddered quoters (Mid + fill-anchored Grid).
+        if field == "size_curve" and strategy_id not in ("grid", "mid"):
             return
 
         def _mutate(s):
@@ -1475,7 +1486,7 @@ def _fmt_strategy_config_text(strategy: str, conf: dict, network: str) -> str:
             f"Size \\(per leg\\): {_leg_size_display(leg_size, str(conf.get('product') or ''), network)} · "
             f"Hold: *{escape_md(_fmt_hold_duration(hold_s))}* · Cycles: *{escape_md(str(cycles))}*\n"
             f"Hedge drift gate: *{escape_md(f'{drift_pct:.1f}%')}*\n"
-            f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+            f"Auto\\-close on maintenance: *{escape_md(auto_close)}*\n\n"
         )
     return base + extra + "Use presets or set custom values below\\."
 
@@ -1496,7 +1507,10 @@ def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
     if strategy == "grid":
         return [("setup", "⚙️ Core"), ("execution", "📐 Spread"), ("risk", "🛡 Risk")]
     if strategy == "rgrid":
-        return [("setup", "⚙️ Core"), ("risk", "🛡 Risk"), ("reset", "🔄 Reset")]
+        # The "reset" section id is kept (callbacks and pending-input routing
+        # use it); only the LABEL changes — on the momentum path the threshold
+        # is a take-profit, not a re-anchor.
+        return [("setup", "⚙️ Core"), ("risk", "🛡 Risk"), ("reset", "🎯 Take Profit")]
     if strategy == "dgrid":
         return [("setup", "⚙️ Core"), ("regime", "⚡ Regime"), ("risk", "🛡 Risk")]
     if strategy == "mid":
@@ -1512,7 +1526,7 @@ def _strategy_section_for_field(strategy: str, field: str) -> str:
     if strategy == "vol":
         return "risk"
     if strategy == "grid":
-        if field in {"min_spread_bp", "max_spread_bp"}:
+        if field in {"min_spread_bp", "max_spread_bp", "grid_reset_threshold_pct"}:
             return "execution"
         if field in {"cycle_notional_usd", "inventory_soft_limit_usd", "session_notional_cap_usd"}:
             return "risk"
@@ -1588,7 +1602,7 @@ def _mm_sizing_line(conf: dict) -> str:
     """'Leverage Nx -> Position $X (margin x lev)' + preset label for the Core
     card, so picking Tiny/Standard or a leverage button VISIBLY changes the card
     and the resulting position size (the #4 'nothing changes' fix)."""
-    margin = float(conf.get("notional_usd", 100.0) or 0.0)
+    margin = _effective_margin_usd(conf)
     override = float(conf.get("mm_leverage_override", 0) or 0)
     eff_lev = _mm_effective_leverage(conf)
     deployed = margin * eff_lev
@@ -1599,6 +1613,75 @@ def _mm_sizing_line(conf: dict) -> str:
         f"Leverage: *{escape_md(f'{eff_lev:.0f}x')}* \\({escape_md(src)}\\) \\| "
         f"Position: *{escape_md(f'${deployed:,.0f}')}* \\(margin×lev\\)\n"
         f"Preset: *{escape_md(preset_label)}*"
+    )
+
+
+def _effective_margin_usd(conf: dict) -> float:
+    """The margin the ENGINE will actually use.
+
+    map_strategy_config resolves ``cycle_notional_usd`` FIRST and only falls
+    back to ``notional_usd``, so a user who taps a "Cycle $250" button gets $250
+    deployed while every card kept printing the old Margin value. Same
+    resolution order here keeps the card and the engine telling one story.
+    """
+    for key in ("cycle_notional_usd", "notional_usd"):
+        try:
+            value = float(conf.get(key) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 100.0
+
+
+def _ladder_line(conf: dict) -> str:
+    """'Levels: N x $S each | Curve: FLAT' for the laddered quoters.
+
+    Shows the PER-LEVEL size because that is the number the venue minimum acts
+    on: the planner drops levels whose size falls under the product floor, so a
+    user picking 8 levels on a small margin needs to see each rung shrink. The
+    total never changes — levels redistribute the same deployment.
+
+    AUDIT-F11: this used to print ``deployed / levels`` — the FLAT size — for
+    every curve. On geometric/4 at $100 it claimed "4 × $25 each" when the plan
+    is $6.67 / $13.33 / $26.67 / $53.33, and it could not show the level count
+    being cut by the venue minimum at all. Ask the planner instead of dividing.
+    """
+    from decimal import Decimal as _D
+
+    from src.nadobro.quant.ladder import plan_ladder
+
+    levels = max(1, int(conf.get("levels", 2) or 2))
+    deployed = _effective_margin_usd(conf) * _mm_effective_leverage(conf)
+    curve = str(conf.get("size_curve") or "flat").lower()
+    min_notional = 0.0
+    product = str(conf.get("product") or "")
+    if product:
+        try:
+            from src.nadobro.venue.product_catalog import get_product_min_quote_notional_usd
+
+            min_notional = float(get_product_min_quote_notional_usd(product) or 0.0)
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(no catalog -> no clamp preview)
+            min_notional = 0.0
+    plan = plan_ladder(
+        _D(str(deployed)), levels=levels, step_bp=1, curve=curve,
+        min_notional=_D(str(min_notional)),
+    )
+    if not plan:
+        return f"Levels: *{escape_md(str(levels))}* \\| Curve: *{escape_md(curve.upper())}*"
+    sizes = [float(lv.size_quote) for lv in plan]
+    if len({f"{s:.2f}" for s in sizes}) == 1:
+        size_str = f"*{escape_md(f'${sizes[0]:,.0f}')}* each"
+    else:
+        size_str = f"*{escape_md(f'${sizes[0]:,.0f}')}*→*{escape_md(f'${sizes[-1]:,.0f}')}* \\(near→deep\\)"
+    clamped = (
+        f"\n⚠️ Capped at *{escape_md(str(len(plan)))}* of {escape_md(str(levels))} levels "
+        f"by the {escape_md(f'${min_notional:,.0f}')} venue minimum\\."
+        if len(plan) < levels else ""
+    )
+    return (
+        f"Levels: *{escape_md(str(len(plan)))}* × {size_str} "
+        f"\\| Curve: *{escape_md(curve.upper())}*{clamped}"
     )
 
 
@@ -1673,48 +1756,76 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "Choose quick presets or set custom values\\."
         )
 
-    notional = float(conf.get("notional_usd", 100.0))
+    notional = _effective_margin_usd(conf)
     spread_bp = float(conf.get("spread_bp", 5.0))
     interval_seconds = int(conf.get("interval_seconds", 60))
     tp_pct = float(conf.get("tp_pct", 1.0))
     sl_pct = float(conf.get("sl_pct", 0.5))
 
     if strategy == "grid":
+        # Fill-anchored Grid reads NONE of threshold_bp / close_offset_bp /
+        # reference_mode / quote_ttl_seconds / inventory_soft_limit_usd /
+        # cycle_notional_usd — yet all of them were rendered here, and the
+        # Execution tab's text described knobs its own keyboard had already
+        # replaced with the spread band. Only live values appear now.
+        from src.nadobro.quant.mm_quote_math import _resolve_directional_bias_value
+
+        try:
+            g_bias = float(_resolve_directional_bias_value(conf.get("directional_bias")))
+        except (TypeError, ValueError):
+            g_bias = 0.0
+        g_bias_str = (
+            f"LONG {g_bias:+.2f}" if g_bias > 0
+            else (f"SHORT {g_bias:+.2f}" if g_bias < 0 else "NEUTRAL")
+        )
         if section == "execution":
-            threshold_str = f"{float(conf.get('threshold_bp', 12.0)):.1f} bp"
-            close_offset_str = f"{float(conf.get('close_offset_bp', 24.0)):.1f} bp"
-            ref_mode = str(conf.get("reference_mode", "ema_fast")).upper()
-            bias = str(conf.get("directional_bias", "neutral")).upper()
-            pov_label = str(conf.get("participation_preset") or "OFF").upper()
+            min_spread = float(conf.get("min_spread_bp", 2.0))
+            max_spread = float(conf.get("max_spread_bp", 20.0))
+            reset_pct = float(conf.get("grid_reset_threshold_pct", 0.2) or 0.2)
             return (
-                "⚙️ *GRID · Execution*\n\n"
-                f"Threshold: *{escape_md(threshold_str)}* \\| "
-                f"Close offset: *{escape_md(close_offset_str)}*\n"
-                f"Reference: *{escape_md(ref_mode)}* \\| "
-                f"Bias: *{escape_md(bias)}*\n"
-                f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n\n"
-                "Tune how quotes react to the market\\."
+                "⚙️ *GRID · Spread*\n\n"
+                f"Spread band: *{escape_md(f'{min_spread:.1f} – {max_spread:.1f} bp')}*\n"
+                f"Soft reset: *{escape_md(f'{reset_pct:.2f}%')}* drift from the anchor\n\n"
+                "The band floors and caps the auto\\-spread\\. Soft reset re\\-anchors both "
+                "legs to mid when price runs away from the last fill\\."
             )
         if section == "risk":
-            cycle_budget = f"${float(conf.get('cycle_notional_usd', notional)):,.0f}"
-            inventory_limit = f"${float(conf.get('inventory_soft_limit_usd', notional * 0.6)):,.0f}"
-            ttl_str = f"{int(conf.get('quote_ttl_seconds', 90))}s"
-            session_cap_value = float(conf.get("session_notional_cap_usd", 0) or 0)
-            session_cap = f"${session_cap_value:,.0f}" if session_cap_value > 0 else "OFF"
             return (
                 "⚙️ *GRID · Risk*\n\n"
-                f"PnL TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}* of margin\n"
-                f"Cycle budget: *{escape_md(cycle_budget)}* \\| "
-                f"Inventory limit: *{escape_md(inventory_limit)}*\n"
-                f"TTL: *{escape_md(ttl_str)}* \\| "
-                f"Session cap: *{escape_md(session_cap)}*\n\n"
-                "Control downside and pacing here\\. These are PnL stops, not raw price\\-move stops\\."
+                f"PnL TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}* of margin\n\n"
+                "Judged NET of fees on live PnL including unrealised\\.\n\n"
+                "The net\\-exposure cap governs FILLED inventory: once a side is "
+                "over the cap only the reducing side keeps quoting\\. Resting "
+                "orders are not capped below one full deployment — a bid and an "
+                "ask net to zero, and refusing the first quote would leave a flat "
+                "book unable to start\\. Your margin is the hard ceiling\\."
             )
+        pov_label = str(conf.get("participation_preset") or "OFF").upper()
+        # Grid runs one of TWO controllers and the card must not describe the
+        # wrong one. fill_anchored=0 (the default) is the classic static band;
+        # =1 is the fill-anchored ladder the Levels/Curve controls drive.
+        _fa = bool(float(conf.get("fill_anchored", 0) or 0))
+        _mode_line = (
+            f"Mode: *Fill\\-anchored ladder*\n{_ladder_line(conf)}\n" if _fa
+            else f"Mode: *Classic band* \\({escape_md(str(int(conf.get('levels', 2) or 2)))} levels\\)\n"
+        )
+        _mode_help = (
+            "Quotes step away from the LAST FILL, never buying above the last sell "
+            "or selling below the last buy\\. Levels split the same margin into rungs "
+            "so the book scales in and out of a move — they never add exposure\\."
+            if _fa else
+            "A static ladder centred on mid, rebuilt each cycle\\. Levels set the "
+            "band width\\. Tap *Fill\\-anchored* to anchor on your last fill instead "
+            "and enable per\\-rung sizing\\."
+        )
         return (
             "⚙️ *GRID · Core*\n\n"
-            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
+            f"Spread: *{escape_md(f'{spread_bp:.1f} bp')}* \\| Bias: *{escape_md(g_bias_str)}*\n"
+            f"{_mode_line}"
+            f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n"
             f"{_mm_sizing_line(conf)}\n\n"
-            "Set the main loop size and cadence\\. *Position size \\= margin × leverage*\\."
+            f"{_mode_help}"
         )
 
     if strategy == "rgrid":
@@ -1728,15 +1839,36 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 "Set when the strategy should cut or lock gains based on realized/open PnL, not raw market drift\\."
             )
         if section == "reset":
-            reset_threshold = f"{float(conf.get('rgrid_reset_threshold_pct', 0.2)):.2f}%"
-            reset_timeout = f"{int(conf.get('rgrid_reset_timeout_seconds', 120))}s"
+            _tp_pct_val = float(conf.get("rgrid_reset_threshold_pct", 0.2) or 0.2)
+            reset_threshold = f"{_tp_pct_val:.2f}%"
             discretion = f"{float(conf.get('rgrid_discretion', 0.06)):.2f}"
+            # The controller REFUSES a target inside 2x the entry band (it would
+            # close the position before the break that opened it is established).
+            # 0.1% is a valid setting yet sits inside the band at the default
+            # 10bp spread — so without this the knob would silently do nothing.
+            _band_bp = max(
+                float(conf.get("rgrid_spread_bp", conf.get("spread_bp", 10.0)) or 10.0),
+                float(conf.get("min_spread_bp", 1.5) or 1.5),
+            )
+            _inactive = _tp_pct_val * 100.0 < 2.0 * _band_bp
+            _tp_note = (
+                f"\n⚠️ Inactive: needs \\> *{escape_md(f'{2.0 * _band_bp / 100.0:.2f}%')}* "
+                f"at a {escape_md(f'{_band_bp:.1f} bp')} band \\(2× the entry band\\)\\."
+                if _inactive else ""
+            )
+            # RGrid runs taker-momentum, where this threshold is a TAKE-PROFIT,
+            # not a re-anchor: on_tick hands off to the momentum path, so grid's
+            # soft reset never runs here. Re-anchoring on drift would suppress
+            # the very break the strategy exists to trade. rgrid_reset_timeout_
+            # seconds is NOT displayed — no controller reads it.
             return (
-                "⚙️ *Reverse GRID · Reset*\n\n"
-                f"Reset threshold: *{escape_md(reset_threshold)}* \\| "
-                f"Timeout: *{escape_md(reset_timeout)}*\n"
-                f"Discretion: *{escape_md(discretion)}*\n\n"
-                "Use these only if you want tighter re-anchoring\\."
+                "⚙️ *Reverse GRID · Take Profit*\n\n"
+                f"Take profit: *{escape_md(reset_threshold)}* favourable move{_tp_note}\n"
+                f"Discretion: *{escape_md(discretion)}* \\(exposure VWAP window\\)\n\n"
+                "RGrid adds INTO a trend and banks the position once it has run "
+                "this far from the exposure price, then re\\-arms\\. Range 0\\.1–10%\\. "
+                "Set it clear of the entry band or a position closes before the "
+                "break that opened it is established\\."
             )
         levels = str(int(conf.get("levels", 4)))
         rgrid_spread = f"{float(conf.get('rgrid_spread_bp', spread_bp)):.1f} bp"
@@ -1784,10 +1916,12 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
         )
 
     if strategy == "mid":
-        # Mid Mode: lean Tread parity — pure mid ± spread. No anchor / no
-        # soft-reset. AUDIT-MID-2026-07-30 #5: "Levels" and "Reference" were
-        # displayed here but are NOT consumed by the mid mapping (a single bid
-        # + ask at full size, always mid-referenced) — dead knobs off the card.
+        # Mid Mode: pure mid ± spread. No anchor / no soft-reset.
+        # AUDIT-MID-2026-07-30 #5 pulled "Levels" and "Reference" off this card
+        # because the mid mapping consumed neither. LADDER (2026-08-02) made
+        # Levels real — it now splits the side's deployment across levels
+        # stepping away from mid — so it is back, with the size curve beside it.
+        # "Reference" stays off: mid mode is always mid-referenced.
         try:
             bias_val = float(conf.get("directional_bias", 0.0) or 0.0)
         except (TypeError, ValueError):
@@ -1802,16 +1936,19 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             return (
                 "⚙️ *MID MODE · Risk*\n\n"
                 f"PnL TP/SL: *{escape_md(f'{tp_pct:.2f}% / {sl_pct:.2f}%')}* of margin\n\n"
-                "Stops are applied to *margin* \\(notional / leverage\\) per Tread spec\\."
+                "Stops are applied to *margin* \\(notional / leverage\\), not to notional\\."
             )
         pov_label = str(conf.get("participation_preset") or "OFF").upper()
         return (
             "⚙️ *MID MODE · Core*\n\n"
             f"Margin: *{escape_md(f'${notional:,.0f}')}* \\| Interval: *{escape_md(f'{interval_seconds}s')}*\n"
             f"Spread: *{escape_md(f'{spread_bp:+.1f} bp')}* \\| Bias: *{escape_md(bias_str)}*\n"
+            f"{_ladder_line(conf)}\n"
             f"POV: *{escape_md(pov_label)}* \\(per\\-cycle pacing from Nado 24h volume\\)\n"
             f"{_mm_sizing_line(conf)}\n\n"
-            "Pure mid ± spread, one bid \\+ one ask\\. No anchor, no soft\\-reset\\. "
+            "Pure mid ± spread\\. No anchor, no soft\\-reset\\. Levels split the same "
+            "margin into rungs stepping away from mid — more rungs scale in and out "
+            "of a move; they never add exposure\\. "
             "Bias range −1\\.0 → \\+1\\.0 \\(short → long\\); \\|1\\.0\\| adds 20% margin\\."
         )
 
@@ -1825,7 +1962,7 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             return (
                 "⚙️ *Delta Neutral · Safety*\n\n"
                 f"Hedge drift gate: *{escape_md(f'{drift_pct:.1f}%')}*\n"
-                f"Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+                f"Auto\\-close on maintenance: *{escape_md(auto_close)}*\n\n"
                 "If the two legs drift apart by more than the gate, both are closed immediately\\."
             )
         return (
@@ -1928,6 +2065,28 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:grid:spread_bp:5"),
                     InlineKeyboardButton("Spread 10bp", callback_data="strategy:set:grid:spread_bp:10"),
                 ],
+                # AUDIT-F10: the Levels/Curve controls below drive the
+                # FILL-ANCHORED quoter, which grid could not reach — fill_anchored
+                # defaults to 0 and only rgrid had a toggle, so the buttons and the
+                # card copy described a controller that never ran. Grid gets the
+                # same opt-in rgrid has.
+                [
+                    InlineKeyboardButton("🪜 Fill-anchored (ladder)", callback_data="strategy:set:grid:fill_anchored:1"),
+                    InlineKeyboardButton("📊 Classic band (default)", callback_data="strategy:set:grid:fill_anchored:0"),
+                ],
+                # LADDER: how many rungs the side's margin is split across, and
+                # how size is distributed over them. The same total either way.
+                [
+                    InlineKeyboardButton("Levels 1", callback_data="strategy:set:grid:levels:1"),
+                    InlineKeyboardButton("2", callback_data="strategy:set:grid:levels:2"),
+                    InlineKeyboardButton("4", callback_data="strategy:set:grid:levels:4"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:grid:levels"),
+                ],
+                [
+                    InlineKeyboardButton("Curve Flat", callback_data="strategy:set_text:grid:size_curve:flat"),
+                    InlineKeyboardButton("Linear", callback_data="strategy:set_text:grid:size_curve:linear"),
+                    InlineKeyboardButton("Geometric", callback_data="strategy:set_text:grid:size_curve:geometric"),
+                ],
                 [
                     InlineKeyboardButton("30s", callback_data="strategy:set:grid:interval_seconds:30"),
                     InlineKeyboardButton("60s", callback_data="strategy:set:grid:interval_seconds:60"),
@@ -1970,6 +2129,15 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("50bp", callback_data="strategy:set:grid:max_spread_bp:50"),
                     InlineKeyboardButton("100bp", callback_data="strategy:set:grid:max_spread_bp:100"),
                 ],
+                # Soft-reset threshold: fully validated and prompt-ready in the
+                # backend since it shipped, but no button existed anywhere, so
+                # the value could never be changed from the UI.
+                [
+                    InlineKeyboardButton("Reset 0.05%", callback_data="strategy:set:grid:grid_reset_threshold_pct:0.05"),
+                    InlineKeyboardButton("0.25%", callback_data="strategy:set:grid:grid_reset_threshold_pct:0.25"),
+                    InlineKeyboardButton("1.0%", callback_data="strategy:set:grid:grid_reset_threshold_pct:1.0"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:grid:grid_reset_threshold_pct"),
+                ],
                 [
                     InlineKeyboardButton("Custom Min Spread", callback_data="strategy:input:grid:min_spread_bp"),
                     InlineKeyboardButton("Custom Max Spread", callback_data="strategy:input:grid:max_spread_bp"),
@@ -1992,21 +2160,15 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Cycle $100", callback_data="strategy:set:grid:cycle_notional_usd:100"),
                     InlineKeyboardButton("Cycle $250", callback_data="strategy:set:grid:cycle_notional_usd:250"),
                 ],
-                [
-                    InlineKeyboardButton("Inv $30", callback_data="strategy:set:grid:inventory_soft_limit_usd:30"),
-                    InlineKeyboardButton("Inv $60", callback_data="strategy:set:grid:inventory_soft_limit_usd:60"),
-                ],
-                [
-                    InlineKeyboardButton("Reset 0.8%", callback_data="strategy:set:grid:grid_reset_threshold_pct:0.8"),
-                    InlineKeyboardButton("1.5%", callback_data="strategy:set:grid:grid_reset_threshold_pct:1.5"),
-                ],
+                # inventory_soft_limit_usd is read ONLY by the mid mapping, so
+                # the old "Inv $30 / $60" buttons did nothing on grid. The reset
+                # presets that sat here duplicated the Spread tab and one of
+                # them (1.5%) is now above the 1% ceiling, i.e. a tap the
+                # validator would silently swallow.
                 [
                     InlineKeyboardButton("Custom TP", callback_data="strategy:input:grid:tp_pct"),
                     InlineKeyboardButton("Custom SL", callback_data="strategy:input:grid:sl_pct"),
-                ],
-                [
                     InlineKeyboardButton("Session Cap", callback_data="strategy:input:grid:session_notional_cap_usd"),
-                    InlineKeyboardButton("Custom Reset", callback_data="strategy:input:grid:grid_reset_threshold_pct"),
                 ],
             ]
     elif strategy == "dgrid":
@@ -2191,13 +2353,18 @@ def _strategy_config_section_kb(strategy: str, section: str):
         else:
             rows = [
                 [
-                    # RGRID-STALE-LADDER: presets must sit INSIDE the ladder band
-                    # (spread x (levels-1) — 30bp on the defaults). 0.8% / 1.5%
-                    # were 3-5x wider than the grid, so the ladder never
-                    # re-centered and quotes went stale. The engine now caps any
-                    # value to the band; these keep the card honest.
-                    InlineKeyboardButton("Reset 0.2%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:0.2"),
-                    InlineKeyboardButton("0.4%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:0.4"),
+                    # Range spans the full 0.1–10% band. RGrid follows trends, so
+                    # its anchor legitimately sits far from mid — a grid-sized
+                    # band would re-anchor constantly and never let a trend run.
+                    # RGRID-STALE-LADDER note: on the CLASSIC ladder opt-out
+                    # (fill_anchored=0) GridTradingController still caps the
+                    # value to the ladder band and logs it, so a wide setting
+                    # cannot strand that path. The fill-anchored default (both
+                    # maker and taker-momentum) honours it verbatim.
+                    InlineKeyboardButton("Reset 0.1%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:0.1"),
+                    InlineKeyboardButton("1%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:1"),
+                    InlineKeyboardButton("5%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:5"),
+                    InlineKeyboardButton("10%", callback_data="strategy:set:rgrid:rgrid_reset_threshold_pct:10"),
                 ],
                 [
                     InlineKeyboardButton("Disc 0.06", callback_data="strategy:set:rgrid:rgrid_discretion:0.06"),
@@ -2251,6 +2418,21 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("Tight 2bp", callback_data="strategy:set:mid:spread_bp:2"),
                     InlineKeyboardButton("Spread 5bp", callback_data="strategy:set:mid:spread_bp:5"),
                     InlineKeyboardButton("Spread 25bp", callback_data="strategy:set:mid:spread_bp:25"),
+                ],
+                # LADDER: restores the "Levels" control AUDIT-MID-2026-07-30 #5
+                # pulled off this card as dead. It is live now — levels split
+                # the side's margin into rungs stepping away from mid, same
+                # total. Curve controls how size is distributed across them.
+                [
+                    InlineKeyboardButton("Levels 1", callback_data="strategy:set:mid:levels:1"),
+                    InlineKeyboardButton("2", callback_data="strategy:set:mid:levels:2"),
+                    InlineKeyboardButton("4", callback_data="strategy:set:mid:levels:4"),
+                    InlineKeyboardButton("✍️", callback_data="strategy:input:mid:levels"),
+                ],
+                [
+                    InlineKeyboardButton("Curve Flat", callback_data="strategy:set_text:mid:size_curve:flat"),
+                    InlineKeyboardButton("Linear", callback_data="strategy:set_text:mid:size_curve:linear"),
+                    InlineKeyboardButton("Geometric", callback_data="strategy:set_text:mid:size_curve:geometric"),
                 ],
                 [
                     InlineKeyboardButton("30s", callback_data="strategy:set:mid:interval_seconds:30"),
@@ -2424,7 +2606,7 @@ def _append_mm_pretrade_breakdown(
     product: str,
     base_preview: str,
 ) -> str:
-    """Phase 3 pre-trade card: appends a Tread-style breakdown for MM strategies.
+    """Phase 3 pre-trade card: appends a sizing/fee breakdown for MM strategies.
 
     Numbers come from ``mm_dashboard.build_pretrade_breakdown`` so the preview
     and the live ``/mm_status`` command stay in sync.
@@ -2471,7 +2653,7 @@ def _append_mm_pretrade_breakdown(
         return base_preview
 
     body = "\n".join(f"• {escape_md(line)}" for line in lines)
-    return f"{base_preview}\n\n📐 *Tread Breakdown*\n{body}"
+    return f"{base_preview}\n\n📐 *Pre\\-Trade Breakdown*\n{body}"
 
 
 def _build_strategy_preview_text(
@@ -2974,7 +3156,7 @@ def _build_strategy_preview_text(
         f"• Short Leverage: *1x* \\(fixed\\)\n"
         f"• Min hold: *{escape_md(dn_hold_label)}*\n"
         f"• Cycles: *{escape_md(dn_cycles_label)}*\n"
-        f"• Auto-close on maintenance: *{escape_md(auto_close)}*\n\n"
+        f"• Auto\\-close on maintenance: *{escape_md(auto_close)}*\n\n"
         "ℹ️ *How it works*\n"
         "Buys spot \\+ 1x\\-shorts the same perp, holds for *at least* the min hold, then keeps the "
         "hedge open while funding stays favorable and closes BOTH legs the moment funding flips "
