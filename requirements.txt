@@ -8,7 +8,11 @@ APScheduler==3.11.2
 # from what urllib3 can decode; installing brotli turns "br" support on
 # (nadoexplorer's edge serves brotli-compressed JSON — 2026-07-14 incident).
 Brotli==1.2.0
-cryptography==48.0.1
+# >=50.0.0 clears CVE-2026-69248 and CVE-2026-69249 (both fixed in 49.0.0) plus
+# CVE-2026-69247 (PKCS#7 Bleichenbacher oracle, fixed only in 50.0.0) — so 50.0.0
+# is the floor that clears all three. Fernet token format is unchanged, so
+# linked-signer keys encrypted under 48.x still decrypt (core/crypto.py).
+cryptography==50.0.0
 eth-account>=0.8.0,<0.9.0
 # Direct dependency (lowiq_relay_client, hl_client); also pulled in by openai.
 httpx>=0.27,<1.0
