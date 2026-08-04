@@ -12,5 +12,9 @@ uvicorn[standard]>=0.34.0,<1.0
 telethon>=1.36.0,<2.0
 asyncpg>=0.29.0,<1.0
 pydantic>=2.0,<3.0
-# >=48.0.1 clears GHSA-537c-gmf6-5ccf (the prior <47.0 cap pinned the vuln).
-cryptography>=48.0.1,<49.0
+# Not imported directly here — this is a security floor for Telethon's
+# transitive use. >=48.0.1 cleared GHSA-537c-gmf6-5ccf; >=50.0.0 now clears
+# CVE-2026-69248/69249 (fixed 49.0.0) and CVE-2026-69247 (fixed 50.0.0).
+# Note the <49.0 cap this replaces had pinned the vuln, exactly as the <47.0
+# cap did before it — when bumping the floor, move the cap with it.
+cryptography>=50.0.0,<51.0
