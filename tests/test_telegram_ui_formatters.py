@@ -30,14 +30,25 @@ class TelegramUiFormatterTests(unittest.TestCase):
         self.assertIn("├ Pick a strategy and I'll open its cockpit", text)
         self.assertIn("pre\\-trade readout", text)
 
-    def test_wallet_connect_card_escapes_private_key(self):
+    def test_wallet_connect_card_renders_the_key_verbatim_and_copyable(self):
+        """Renamed from ..._escapes_private_key, which pinned the OPPOSITE of
+        the correct behaviour: it asserted the key came out as `0xabc\\_def`,
+        i.e. with a literal backslash injected by escape_md. Inside a
+        MarkdownV2 code entity only ` and \\ are special, so that backslash was
+        rendered verbatim and would have been COPIED as part of the key.
+
+        The key now sits in a ``pre`` block (Telegram draws a copy button) and
+        must appear byte-for-byte, unescaped."""
         text = formatters.fmt_wallet_connect_card("0xabc_def")
         self.assertIn("*Setup steps*", text)
-        self.assertIn("`0xabc\\_def`", text)
+        self.assertIn("```\n0xabc_def\n```", text)
+        self.assertNotIn("0xabc\\_def", text)
         self.assertIn("tap to copy", text)
-        self.assertNotIn("│ `0xabc", text)
         self.assertIn("1\\-Click Trading", text)
-        self.assertIn("app\\.nado\\.xyz\\?join=FzpOSwX", text)
+        # '=' is MarkdownV2-reserved. Unescaped, Telegram rejected the whole
+        # card and the plain-text fallback stripped the backticks — which is
+        # what removed the key's copy affordance in the first place.
+        self.assertIn("app\\.nado\\.xyz\\?join\\=FzpOSwX", text)
 
     def test_alert_menu_intro_uses_new_toolkit_copy(self):
         text = formatters.fmt_alert_menu_intro()

@@ -26,6 +26,21 @@ def escape_md(text):
     return re.sub(r'([' + re.escape(special) + r'])', r'\\\1', text)
 
 
+def escape_md_code(text) -> str:
+    """Escape for the INSIDE of a MarkdownV2 ``code``/``pre`` entity.
+
+    Telegram only treats a backtick and a backslash as special inside a code
+    entity; every other reserved character is literal there. Passing such text
+    through :func:`escape_md` therefore injects backslashes that Telegram
+    renders VERBATIM — and for a tap-to-copy block that means the user copies a
+    corrupted value. A 1CT key is pure hex today, so ``escape_md`` happened to
+    be a no-op on it; this makes the guarantee explicit rather than incidental.
+    """
+    if text is None:
+        return ""
+    return str(text).replace("\\", "\\\\").replace("`", "\\`")
+
+
 def format_ai_response(text: str) -> str:
     """Convert LLM markdown output to Telegram MarkdownV2.
 
@@ -1368,7 +1383,12 @@ def fmt_settings(user_data):
 
 
 def fmt_wallet_connect_card(pk_hex: str) -> str:
-    key_line = f"`{escape_md(pk_hex)}`"
+    # A fenced ``pre`` block, not an inline code span: Telegram renders it with
+    # an explicit COPY button, where inline code relies on the user knowing to
+    # tap it. Same tap-to-copy semantics, a visible affordance. Escaped with
+    # escape_md_code — inside a code entity only ` and \\ are special, and using
+    # the general escaper would put literal backslashes into the copied key.
+    key_line = f"```\n{escape_md_code(pk_hex)}\n```"
     return "\n\n".join(
         [
             _ui_header("Wallet Connect", icon="👛"),
@@ -1376,7 +1396,7 @@ def fmt_wallet_connect_card(pk_hex: str) -> str:
             _ui_section(
                 "Setup steps",
                 [
-                    "├ 1\\. Open https://app\\.nado\\.xyz\\?join=FzpOSwX, connect your wallet, and deposit at least $5 USDT0\\.",
+                    "├ 1\\. Open https://app\\.nado\\.xyz\\?join\\=FzpOSwX, connect your wallet, and deposit at least $5 USDT0\\.",
                     "├ 2\\. Go to *Settings → 1\\-Click Trading → Advanced 1CT*\\.",
                     "├ 3\\. Paste the trading key below into *1CT Private Key* \\(tap to copy\\):",
                     "├ 4\\. Enable the toggle, save, and confirm the wallet transaction\\.",
