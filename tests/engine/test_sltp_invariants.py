@@ -120,19 +120,20 @@ def test_grid_does_not_set_fill_blind_limit_price_stop():
         assert float(cfg.get("limit_price") or 0) == 0.0
 
 
-def test_grid_barrier_carries_user_sl_and_tp_for_executor_enforcement():
-    """The classic-ladder executor barrier still carries the user's sl/tp
-    (avg-entry based, consistent with the margin rail) so the executor enforces
-    both — including take-profit, which GRID-TP-DEAD left dead. (Grid now defaults
-    to fill-anchored, which enforces SL/TP via the session margin-% rail, not a
-    per-level barrier; the classic ladder is the fill_anchored=0 escape.)"""
+def test_classic_ladder_does_not_turn_a_margin_percent_into_a_level_barrier():
+    """The classic ladder used to copy the user's %-of-margin sl/tp onto the
+    executor's avg-entry barrier. That is a different quantity twice over — per
+    LEVEL rather than per session, and leverage-blind — so it stopped out roughly
+    ``levels`` times early and paid taker fees to do it. The ladder still takes
+    profit per level the way a grid does (a filled BUY is closed by its paired
+    SELL one step up); the SESSION stop is the rail's job."""
     cfg = map_strategy_config(
         "grid", {"sl_pct": 0.5, "tp_pct": 1.0, "fill_anchored": 0}, MID, product=PRODUCT
     )
-    tbc = cfg.get("triple_barrier_config")
-    assert tbc is not None
-    assert float(getattr(tbc, "stop_loss", 0) or 0) > 0
-    assert float(getattr(tbc, "take_profit", 0) or 0) > 0
+    assert "triple_barrier_config" not in cfg
+    assert float(cfg.get("limit_price") or 0) == 0.0
+    # The user's numbers still reach the rail unchanged.
+    assert effective_sl_tp_pct("grid", {"sl_pct": 0.5, "tp_pct": 1.0}) == (0.5, 1.0)
 
 
 # Note on DN-RAIL (Critical) and SLTP-GROSS / GRID-TP-DEAD:
@@ -204,3 +205,154 @@ def test_cross_position_with_explicit_est_pnl_is_unchanged():
     cross = {"side": "short", "amount": "10", "signed_amount": "-10",
              "avg_entry_price": "1933.9", "est_pnl": "-315.55"}
     assert float(derive_unrealized_pnl(cross)) == -315.55
+
+
+# ==========================================================================
+# R-Grid SL/TP coverage (2026-08-06)
+# ==========================================================================
+# R-Grid moved to its own controller + taker executor. Its SL/TP must still be
+# the %-of-margin SESSION rail (live PnL incl. uPnL, judged net of fees) — and
+# must NOT ALSO become a price-move barrier on the same user number.
+def test_rgrid_sltp_is_the_session_rail_only_never_also_a_price_barrier():
+    cfg = map_strategy_config(
+        "rgrid",
+        {"sl_pct": 0.5, "tp_pct": 1.0,
+         "rgrid_stop_loss_pct": 2.0, "rgrid_take_profit_pct": 5.0},
+        MID, product=PRODUCT,
+    )
+    assert cfg.get("triple_barrier_config") is None, (
+        "the same user number must be either a barrier or a rail, never both"
+    )
+    assert float(cfg.get("limit_price") or 0) == 0.0
+    assert effective_sl_tp_pct(
+        "rgrid", {"rgrid_stop_loss_pct": 2.0, "rgrid_take_profit_pct": 5.0}
+    ) == (2.0, 5.0)
+
+
+def test_rgrid_is_on_the_session_rail_branch_in_the_cycle():
+    """Structural guard: the rail only runs for the strategies named in
+    bot_runtime._run_cycle. If rgrid ever drops out of that tuple its stop stops
+    existing — silently, because nothing else enforces it for this controller."""
+    import inspect
+
+    from src.nadobro.strategy import bot_runtime
+
+    source = inspect.getsource(bot_runtime._run_cycle)
+    assert 'if strategy in ("grid", "rgrid", "dgrid", "mid"):' in source, (
+        "rgrid must stay on the session SL/TP rail branch"
+    )
+    assert "_evaluate_session_pnl_rail" in source
+
+
+def test_rgrid_and_dgrid_are_engine_mapped_so_a_rail_can_target_them():
+    from src.nadobro.strategy.engine_runtime import ENGINE_MAPPED_STRATEGIES
+
+    assert "rgrid" in ENGINE_MAPPED_STRATEGIES
+    assert "dgrid" in ENGINE_MAPPED_STRATEGIES
+
+
+# ==========================================================================
+# Pre-existing [VERIFIED] findings — self-review audit 2026-08-06
+# ==========================================================================
+# Recorded as strict xfails per the triage protocol: they were found by the
+# audit, they are NOT regressions from the R-Grid/D-Grid work, and fixing either
+# changes live stop behaviour for real grid/dgrid sessions — a product call, not
+# a silent one. When each is fixed the marker must be deleted in the same PR
+# (strict mode turns an XPASS into a failure, which is the cue).
+def test_dgrid_sltp_is_not_applied_as_both_a_barrier_and_a_rail():
+    """DGRID-DUAL-UNIT-SLTP — FIXED. The user's %-of-margin SL/TP no longer become
+    a per-level price barrier: the session rail is the single enforcement point,
+    as it already was for rgrid and mid."""
+    cfg = map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "rgrid_stop_loss_pct": 0.8,
+                  "rgrid_take_profit_pct": 1.2},
+        MID, product=PRODUCT,
+    )
+    rail_sl, _ = effective_sl_tp_pct("dgrid", {"rgrid_stop_loss_pct": 0.8,
+                                               "rgrid_take_profit_pct": 1.2})
+    barrier = cfg.get("triple_barrier_config")
+    barrier_sl = float(getattr(barrier, "stop_loss", 0) or 0)
+    assert not (rail_sl > 0 and barrier_sl > 0), (
+        f"the same 0.8% is a {barrier_sl} price-move barrier AND a {rail_sl}% "
+        "of-margin rail"
+    )
+
+
+def test_overlay_cannot_touch_the_executor_barrier_at_all():
+    """OVERLAY-BARRIER-UNITS. The overlay's sl_pct/tp_pct are % of MARGIN; the
+    executor barrier is a PRICE-return fraction. The overlay used to convert one
+    into the other with a bare /100, which both mixed units (off by ``leverage``)
+    and overwrote the user's configured barrier. It must leave the barrier alone —
+    its regime-adjusted numbers belong to the %-of-margin session rail."""
+    from src.nadobro.llm.signal_engine import Signal
+    from src.nadobro.strategy.overlay_actuator import (
+        apply_overrides_to_configs, compute_overrides, rail_barriers,
+    )
+
+    from src.nadobro.engine.types import TripleBarrierConfig
+
+    user_tp_pct, user_sl_pct = 1.2, 0.8
+    chop = Signal(regime="chop", sl_pct=0.64, tp_pct=0.96, confidence=0.5)
+    cfg = map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "rgrid_stop_loss_pct": user_sl_pct,
+                  "rgrid_take_profit_pct": user_tp_pct},
+        MID, product=PRODUCT,
+    )
+    # The mapping emits none at all now; a hand-set one must survive untouched too.
+    assert "triple_barrier_config" not in cfg
+    before = TripleBarrierConfig(take_profit=Decimal("0.01"), stop_loss=Decimal("0.005"))
+    cfg["triple_barrier_config"] = before
+    apply_overrides_to_configs("dgrid", cfg, compute_overrides("dgrid", chop))
+    assert cfg["triple_barrier_config"] is before, "the overlay rewrote the barrier"
+
+    # And on the rail the user's TP is still the floor (widen-only).
+    _, rail_tp = rail_barriers(user_sl_pct, user_tp_pct, chop)
+    assert rail_tp >= user_tp_pct
+
+
+def test_no_engine_strategy_emits_a_session_sltp_as_a_price_barrier():
+    """One number, one unit, one enforcement point — for every MM strategy."""
+    for strategy in ("grid", "rgrid", "dgrid", "mid"):
+        cfg = map_strategy_config(
+            strategy,
+            {"notional_usd": 100.0, "rgrid_stop_loss_pct": 0.8,
+             "rgrid_take_profit_pct": 1.2, "sl_pct": 0.8, "tp_pct": 1.2,
+             "mm_leverage_override": 49},
+            MID, product=PRODUCT,
+        )
+        barrier = cfg.get("triple_barrier_config")
+        assert barrier is None or (
+            getattr(barrier, "stop_loss", None) is None
+            and getattr(barrier, "take_profit", None) is None
+        ), f"{strategy} still carries a price-move barrier for a %-of-margin number"
+        assert float(cfg.get("limit_price") or 0) == 0.0, strategy
+
+
+def test_dgrid_tp_tiers_receive_a_percent_not_a_fraction():
+    """DGRID-TP-TIER-UNITS. ``DynamicGridController._tp_tier_ladder`` reads
+    ``cfg["tp_pct"]`` as a PERCENT and compares the ladder against ``upnl_pct``,
+    also a percent. The mapping handed it the /100 fraction, making every tier
+    100x too small: with the shipped 1.2% TP the tiers landed at 0.004/0.008/0.012
+    % of margin, so D-Grid scaled out a third of the position on the first
+    favourable tick and never let a winner run."""
+    cfg = map_strategy_config(
+        "dgrid", {"notional_usd": 100.0, "rgrid_stop_loss_pct": 0.8,
+                  "rgrid_take_profit_pct": 1.2},
+        MID, product=PRODUCT,
+    )
+    assert float(cfg["tp_pct"]) == 1.2, "tier ladder needs a percent"
+    assert float(cfg["sl_pct"]) == 0.8
+    # And the ladder it produces tops out AT the user's TP, in % of margin.
+    from src.nadobro.engine.controllers.dynamic_grid import DynamicGridController
+    from src.nadobro.engine.inventory import InventoryRepository
+    from src.nadobro.engine.orchestrator import ExecutorOrchestrator
+    from tests.engine._mock_nado import MockNadoAdapter
+
+    c = DynamicGridController(
+        user_id=1, orchestrator=ExecutorOrchestrator(),
+        adapter=MockNadoAdapter(mid=MID), inventory=InventoryRepository(),
+        configs={**cfg, "trading_pair": PRODUCT, "tp_margin_basis": Decimal(100)},
+    )
+    tiers, basis = c._tp_tier_ladder()
+    assert max(tiers) == pytest.approx(1.2), tiers
+    assert basis == Decimal(100)

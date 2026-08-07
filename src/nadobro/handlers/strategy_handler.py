@@ -864,8 +864,10 @@ async def _handle_strategy(query, data, context, telegram_id):
             "dgrid_spread_bp", "dgrid_min_spread_bp", "dgrid_max_spread_bp",
             "dgrid_short_window_points", "dgrid_long_window_points",
             "auto_close_on_maintenance", "is_long_bias",
-            # R-Grid trend-follow toggle (1 = fill-anchored taker-momentum, the
-            # default for rgrid; 0 = classic one-sided ladder).
+            # GRID quoting mode (1 = fill-anchored maker with no-cross + soft reset,
+            # 0 = classic static ladder). Ignored for rgrid: Reverse Grid has one
+            # engine, and letting this route it elsewhere is what made R-Grid
+            # sessions announce D-Grid phase flips.
             "fill_anchored",
             # Mid Mode accepts directional_bias as a continuous float in [-1, +1].
             "directional_bias",
@@ -1507,10 +1509,10 @@ def _strategy_config_sections(strategy: str) -> list[tuple[str, str]]:
     if strategy == "grid":
         return [("setup", "⚙️ Core"), ("execution", "📐 Spread"), ("risk", "🛡 Risk")]
     if strategy == "rgrid":
-        # The "reset" section id is kept (callbacks and pending-input routing
-        # use it); only the LABEL changes — on the momentum path the threshold
-        # is a take-profit, not a re-anchor.
-        return [("setup", "⚙️ Core"), ("risk", "🛡 Risk"), ("reset", "🎯 Take Profit")]
+        # The "reset" section id is kept (callbacks and pending-input routing use
+        # it). The threshold ARMS the trailing soft reset: once price has drifted
+        # favourably by it, the exit leg follows the trend instead of banking.
+        return [("setup", "⚙️ Core"), ("risk", "🛡 Risk"), ("reset", "🎯 Soft Reset")]
     if strategy == "dgrid":
         return [("setup", "⚙️ Core"), ("regime", "⚡ Regime"), ("risk", "🛡 Risk")]
     if strategy == "mid":
@@ -1596,6 +1598,97 @@ def _mm_effective_leverage(conf: dict) -> float:
     the SAME leverage the engine will deploy."""
     override = float(conf.get("mm_leverage_override", 0) or 0)
     return override if override >= 1 else 3.0
+
+
+def rgrid_step_plan(conf: dict, sl_pct_val: float):
+    """The per-break size R-Grid will actually trade, and why.
+
+    Uses the SAME pure math the engine mapping uses
+    (:mod:`src.nadobro.quant.rgrid_sizing`), so the card can never quote a size
+    the strategy does not place. Lazy import: handlers/ has no module-level edge
+    to quant/ (tests/lint/test_architecture_layers.py).
+    """
+    from src.nadobro.quant.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD
+    from src.nadobro.quant.rgrid_sizing import resolve_step_quote
+    from src.nadobro.strategy.strategy_registry import session_margin_usd
+
+    # TWO different bases, on purpose — mixing them is what the 2026-08-06 audit
+    # caught. Deployment is cycle-first (what the engine actually trades); the stop
+    # budget is notional-first (what the session rail measures its % against).
+    deploy_margin = _effective_margin_usd(conf)
+    rail_margin = session_margin_usd(conf) or deploy_margin
+    levels = max(1, int(float(conf.get("levels", 4) or 4)))
+    return rail_margin, resolve_step_quote(
+        deployed_quote=deploy_margin * _mm_effective_leverage(conf),
+        levels=levels,
+        stop_budget_usd=rail_margin * max(0.0, sl_pct_val) / 100.0,
+        min_step_usd=DEFAULT_MIN_ORDER_NOTIONAL_USD,
+    )
+
+
+def rgrid_stop_headroom(conf: dict, sl_pct_val: float) -> dict:
+    """How much room the session stop leaves R-Grid to trade, AFTER the step cap.
+
+    SL/TP are % of MARGIN and the rail judges live PnL NET of fees, so the real
+    question is not "is 1% a sensible stop" but "how many taker round trips fit
+    inside 1% of my margin before the stop fires on costs alone". The engine now
+    caps the step so at least ~3 do; this reports the resulting numbers, and flags
+    the one case the cap cannot fix.
+    """
+    margin, plan = rgrid_step_plan(conf, sl_pct_val)
+    budget = float(plan.stop_budget_usd)
+    fee = float(plan.round_trip_cost)
+    return {
+        "margin": margin,
+        "budget_usd": budget,
+        "step_usd": float(plan.step),
+        "uncapped_step_usd": float(plan.uncapped),
+        "round_trip_usd": fee,
+        "ratio": (fee / budget) if budget > 0 else 0.0,
+        "round_trips": (budget / fee) if fee > 0 else float("inf"),
+        "capped": bool(plan.capped),
+        "floored": bool(plan.floored),
+    }
+
+
+def _rgrid_step_cap_note(conf: dict, sl_pct_val: float) -> str:
+    """Explain a step that is smaller than margin x leverage / levels, or warn when
+    even the venue-minimum step cannot fit inside the stop."""
+    room = rgrid_stop_headroom(conf, sl_pct_val)
+    if room["budget_usd"] <= 0:
+        return (
+            "\n\n⚠️ PnL stop disarmed — the step is NOT capped against a stop "
+            "budget; only the net\\-exposure cap and take profit remain\\."
+        )
+    step = escape_md(f"${room['step_usd']:,.0f}")
+    fee = escape_md(f"${room['round_trip_usd']:,.2f}")
+    budget = escape_md(f"${room['budget_usd']:,.2f}")
+    if room["floored"]:
+        # The budget wanted a step SMALLER than the venue accepts, so the cap could
+        # not finish the job. How bad that is depends on what is actually left.
+        if room["ratio"] >= 1.0:
+            return (
+                f"\n\n🚨 *Stop too tight to trade\\.* The smallest step the venue "
+                f"accepts \\({step}\\) costs {fee} per taker round trip — more than "
+                f"your whole {budget} stop budget, so the session stops out on fees "
+                "alone whichever way price goes\\. Raise the PnL stop or add margin\\."
+            )
+        trips = escape_md(f"{room['round_trips']:.1f}")
+        return (
+            f"\n\n⚠️ *Thin\\.* The step is already at the venue minimum \\({step}\\) "
+            f"so it cannot be capped further: {fee} per round trip leaves only about "
+            f"{trips} inside your {budget} stop budget\\. Raise the PnL stop or add "
+            "margin for more room\\."
+        )
+    if room["capped"]:
+        uncapped = escape_md(f"${room['uncapped_step_usd']:,.0f}")
+        trips = escape_md(f"{room['round_trips']:.0f}")
+        return (
+            f"\n\n🛡 Step capped to *{step}* per break \\(from {uncapped}\\) so your "
+            f"stop budget covers about {trips} taker round trips\\. Raise the PnL "
+            "stop or lower leverage to trade larger steps\\."
+        )
+    return ""
 
 
 def _mm_sizing_line(conf: dict) -> str:
@@ -1830,13 +1923,30 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
 
     if strategy == "rgrid":
         if section == "risk":
-            pnl_sl = f"{float(conf.get('rgrid_stop_loss_pct', sl_pct)):.2f}%"
+            _sl_val = float(conf.get("rgrid_stop_loss_pct", sl_pct) or 0.0)
+            pnl_sl = f"{_sl_val:.2f}%"
             pnl_tp = f"{float(conf.get('rgrid_take_profit_pct', tp_pct)):.2f}%"
+            _room = rgrid_stop_headroom(conf, _sl_val)
+            _budget_txt = escape_md(f"${_room['budget_usd']:,.2f}")
+            _margin_txt = escape_md(f"${_room['margin']:,.0f}")
+            _rt_txt = escape_md(f"${_room['round_trip_usd']:,.2f}")
+            _step_txt = escape_md(f"${_room['step_usd']:,.0f}")
+            _budget_line = (
+                f"Stop budget: *{_budget_txt}* "
+                f"\\({escape_md(pnl_sl)} of {_margin_txt} margin\\)\n"
+                f"Step: *{_step_txt}* per break \\| Taker round trip: *{_rt_txt}*\n"
+                if _room["budget_usd"] > 0 else ""
+            )
             return (
                 "⚙️ *Reverse GRID · Risk*\n\n"
                 f"PnL stop: *{escape_md(pnl_sl)}* \\| "
-                f"PnL take profit: *{escape_md(pnl_tp)}*\n\n"
-                "Set when the strategy should cut or lock gains based on realized/open PnL, not raw market drift\\."
+                f"PnL take profit: *{escape_md(pnl_tp)}*\n"
+                f"{_budget_line}\n"
+                "Both are % of MARGIN, measured on live PnL \\(realized \\+ open\\) "
+                "NET of fees — not raw market drift\\. R\\-Grid crosses the spread on "
+                "both legs, so its costs are charged against the same budget, and the "
+                "size per break is capped to fit inside it\\."
+                f"{_rgrid_step_cap_note(conf, _sl_val)}"
             )
         if section == "reset":
             _tp_pct_val = float(conf.get("rgrid_reset_threshold_pct", 0.2) or 0.2)
@@ -1856,19 +1966,21 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 f"at a {escape_md(f'{_band_bp:.1f} bp')} band \\(2× the entry band\\)\\."
                 if _inactive else ""
             )
-            # RGrid runs taker-momentum, where this threshold is a TAKE-PROFIT,
-            # not a re-anchor: on_tick hands off to the momentum path, so grid's
-            # soft reset never runs here. Re-anchoring on drift would suppress
-            # the very break the strategy exists to trade. rgrid_reset_timeout_
-            # seconds is NOT displayed — no controller reads it.
+            # This threshold ARMS the soft reset — it is not a re-anchor (grid's
+            # meaning) and no longer an immediate take-profit. Re-anchoring the
+            # ENTRY on drift would suppress the very break the strategy exists to
+            # trade; banking at the threshold would stop it following the trend.
+            # rgrid_reset_timeout_seconds is NOT displayed — no controller reads it.
             return (
-                "⚙️ *Reverse GRID · Take Profit*\n\n"
-                f"Take profit: *{escape_md(reset_threshold)}* favourable move{_tp_note}\n"
+                "⚙️ *Reverse GRID · Soft Reset*\n\n"
+                f"Arms after: *{escape_md(reset_threshold)}* favourable move{_tp_note}\n"
                 f"Discretion: *{escape_md(discretion)}* \\(exposure VWAP window\\)\n\n"
-                "RGrid adds INTO a trend and banks the position once it has run "
-                "this far from the exposure price, then re\\-arms\\. Range 0\\.1–10%\\. "
-                "Set it clear of the entry band or a position closes before the "
-                "break that opened it is established\\."
+                "R\\-Grid adds INTO a trend\\. Once the move has gone this far your "
+                "way *and* you are in profit, the exit leg starts FOLLOWING the "
+                "trend — it trails the best price by one spread instead of sitting "
+                "at your entry, so the run keeps going and the profit is locked\\. "
+                "Range 0\\.1–10%\\. Set it clear of the entry band or the exit would "
+                "arm before the break that opened the position is established\\."
             )
         levels = str(int(conf.get("levels", 4)))
         rgrid_spread = f"{float(conf.get('rgrid_spread_bp', spread_bp)):.1f} bp"
@@ -1879,7 +1991,11 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             f"Levels: *{escape_md(levels)}* \\| Spread: *{escape_md(rgrid_spread)}*\n"
             f"POV: *{escape_md(pov_label)}*\n"
             f"{_mm_sizing_line(conf)}\n\n"
-            "Set the basic breakout loop here\\. *Position size \\= margin × leverage*\\."
+            "Both legs sit one spread either side of the *average of your buy and "
+            "sell exposure prices*: it buys as price rises above that, sells as it "
+            "falls below\\. Fills are taker, so a break is actually captured\\. "
+            "Profits in trends, stalls in chop — the mirror of GRID\\. "
+            "*Position size \\= margin × leverage*\\."
         )
 
     if strategy == "dgrid":
@@ -2308,10 +2424,11 @@ def _strategy_config_section_kb(strategy: str, section: str):
                     InlineKeyboardButton("60s", callback_data="strategy:set:rgrid:interval_seconds:60"),
                     InlineKeyboardButton("120s", callback_data="strategy:set:rgrid:interval_seconds:120"),
                 ],
-                [
-                    InlineKeyboardButton("🌊 Momentum (taker)", callback_data="strategy:set:rgrid:fill_anchored:1"),
-                    InlineKeyboardButton("📊 Directional ladder (default)", callback_data="strategy:set:rgrid:fill_anchored:0"),
-                ],
+                # No mode toggle: Reverse Grid has exactly one engine (both legs
+                # quote off the average of the buy/sell exposure prices and take
+                # the break). The old "Directional ladder" option routed R-Grid to
+                # the D-Grid phase switcher, which is why R-Grid sessions reported
+                # "switched RGRID → GRID" — pick D-Grid if you want a switcher.
                 [
                     InlineKeyboardButton("Discretion 0.06", callback_data="strategy:set:rgrid:rgrid_discretion:0.06"),
                     InlineKeyboardButton("0.12", callback_data="strategy:set:rgrid:rgrid_discretion:0.12"),

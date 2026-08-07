@@ -100,3 +100,43 @@ def test_startup_trade_column_migrations_are_idempotent():
     assert "ALTER TABLE trades ADD COLUMN IF NOT EXISTS {col} {col_type}" in ddl
     assert "ALTER TABLE trades ADD COLUMN {col} {col_type}" not in ddl
     assert "ALTER TABLE {table} ADD COLUMN {col} {col_type}" not in ddl
+
+
+def test_signal_outcomes_migration_covers_startup_ddl_and_allowlist():
+    """The grading ledger has to be declared in three places or it half-exists.
+
+    ``insert_signal_outcome`` filters writes against a hardcoded column
+    allowlist, so a column present in the migration but missing from that list
+    is silently dropped on every insert — the row lands with a NULL and nothing
+    errors. Pin all three together.
+    """
+    sql = Path("src/nadobro/migrations/0019_signal_outcomes.sql").read_text()
+    ddl = Path("src/nadobro/db.py").read_text()
+    accessors = Path("src/nadobro/models/database.py").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS signal_outcomes" in sql
+    assert "CREATE TABLE IF NOT EXISTS signal_outcomes" in ddl
+    # Idempotent re-grading depends on this constraint existing in both.
+    assert "UNIQUE (signal_id, horizon)" in sql
+    assert "UNIQUE (signal_id, horizon)" in ddl
+    assert "REFERENCES overlay_signals (id) ON DELETE CASCADE" in sql
+    assert "REFERENCES overlay_signals (id) ON DELETE CASCADE" in ddl
+
+    graded_columns = (
+        "signal_id", "user_id", "network", "strategy", "product_id",
+        "product_name", "ts_signal", "mid_at_signal", "bias", "regime",
+        "confidence", "horizon", "fwd_return", "excursion_up",
+        "excursion_down", "directional_hit", "bars_used",
+    )
+    for col in graded_columns:
+        assert col in sql, f"{col} missing from migration"
+        assert col in ddl, f"{col} missing from db.py startup DDL"
+        assert f'"{col}"' in accessors, f"{col} missing from insert allowlist"
+
+    for index in (
+        "idx_signal_outcomes_user",
+        "idx_signal_outcomes_horizon",
+        "idx_signal_outcomes_regime",
+    ):
+        assert index in sql, index
+        assert index in ddl, index

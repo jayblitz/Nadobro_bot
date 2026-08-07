@@ -517,3 +517,202 @@ def test_tiered_tp_falls_back_to_legacy_when_no_tp_set():
         assert c._booked_tiers == {0}
 
     asyncio.run(body())
+
+
+# ==========================================================================
+# Flip NOTIFICATION wording (2026-08-06)
+# ==========================================================================
+# Reported: "🔄 Reverse GRID switched RGRID → GRID … downtrend detected
+# (variance ratio 0.83) … now quoting the LONG ladder." The decision was right
+# (the decline had stalled below the release threshold, so the neutral long grid
+# is correct) — the message was wrong: it read sign(drift) as a trend verdict.
+def test_flip_event_records_whether_a_trend_was_actually_declared():
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        box = {"data": _range()}
+        cfg = dict(CFG, candle_provider=lambda p: box["data"], dgrid_flip_confirm_ticks=1)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=InventoryRepository(), configs=cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        box["data"] = _down()
+        await orch.tick_controller(c.id)
+        event = c.consume_dgrid_event()
+        assert event and event["to"] == "rgrid"
+        assert event["trending"] == "1", "a real downtrend must be flagged as a trend"
+
+    asyncio.run(body())
+
+
+def test_flip_reason_never_calls_a_stalled_drift_a_downtrend():
+    from src.nadobro.strategy.bot_runtime import dgrid_flip_reason
+
+    # The exact reported event: back to the long grid while drift is barely
+    # negative and the classifier says RANGING.
+    assert dgrid_flip_reason({
+        "from": "rgrid", "to": "grid", "direction": "down",
+        "trending": "", "variance_ratio": "0.83", "reason": "flip",
+    }) == "trend stalled — back to range mode"
+    # A declared downtrend still reads as one.
+    assert dgrid_flip_reason({
+        "from": "grid", "to": "rgrid", "direction": "down",
+        "trending": "1", "variance_ratio": "1.40", "reason": "flip",
+    }) == "downtrend detected"
+    assert dgrid_flip_reason({
+        "from": "rgrid", "to": "grid", "direction": "up",
+        "trending": "1", "variance_ratio": "1.40", "reason": "flip",
+    }) == "uptrend detected"
+    # The trailing-reversal flip keeps its own wording.
+    assert dgrid_flip_reason({
+        "from": "grid", "to": "rgrid", "direction": "flat",
+        "trending": "", "reason": "reversal",
+    }) == "reversal — locked profit, flipping"
+
+
+def test_reverse_grid_can_no_longer_emit_a_phase_flip_at_all():
+    """R-Grid is not a phase switcher — it runs its own controller and its own
+    taker executor, so these messages cannot reach an R-Grid user any more."""
+    from src.nadobro.engine.controllers.rgrid import RGridController
+    from src.nadobro.strategy.engine_runtime import CONTROLLER_REGISTRY
+
+    assert CONTROLLER_REGISTRY["rgrid"] is RGridController
+    assert CONTROLLER_REGISTRY["dgrid"] is DynamicGridController
+    assert not hasattr(RGridController, "consume_dgrid_event")
+
+
+# ==========================================================================
+# Financial overlay ↔ phase switching (2026-08-06)
+# ==========================================================================
+# D-Grid IS the switcher, so it must switch well: the variance classifier owns
+# the decision and the overlay is a second opinion that can only make a flip more
+# conservative. A wrong flip costs a reduce-only round trip AND leaves the book on
+# the wrong side of the move.
+def _dg(**cfg):
+    adapter = MockNadoAdapter(mid=Decimal(100))
+    orch = ExecutorOrchestrator()
+    base = dict(CFG, candle_provider=lambda p: _range(), dgrid_flip_confirm_ticks=2)
+    base.update(cfg)
+    return DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                 inventory=InventoryRepository(), configs=base)
+
+
+def test_a_confirming_overlay_leaves_the_debounce_alone():
+    c = _dg(signal_regime="trend_down", signal_confidence=0.9)
+    assert c._required_confirm_ticks("rgrid") == 2
+
+
+def test_a_contradicting_overlay_buys_one_more_confirming_tick():
+    """Overlay reads an UPtrend while the classifier wants the short phase: wait
+    one extra tick rather than flipping on a contested read."""
+    c = _dg(signal_regime="trend_up", signal_confidence=0.9)
+    assert c._required_confirm_ticks("rgrid") == 3
+
+
+def test_an_unconfident_overlay_is_ignored():
+    c = _dg(signal_regime="trend_up", signal_confidence=0.10)
+    assert c._required_confirm_ticks("rgrid") == 2
+    assert c._signal_phase() is None
+
+
+def test_a_rangebound_overlay_has_no_directional_opinion():
+    for regime in ("range", "chop", ""):
+        c = _dg(signal_regime=regime, signal_confidence=0.9)
+        assert c._signal_phase() is None
+        assert c._required_confirm_ticks("rgrid") == 2
+
+
+def test_the_overlay_can_never_shorten_the_debounce_or_flip_on_its_own():
+    """It is advisory: at worst D-Grid waits one tick longer. It must never make
+    the switcher quicker to flip, and never cause a flip by itself."""
+    for regime in ("trend_up", "trend_down", "range", "chop"):
+        for conf in (0.0, 0.5, 1.0):
+            c = _dg(signal_regime=regime, signal_confidence=conf,
+                    dgrid_flip_confirm_ticks=2)
+            assert c._required_confirm_ticks("grid") >= 2
+            assert c._required_confirm_ticks("rgrid") >= 2
+
+
+def test_the_switcher_still_flips_on_a_confirmed_regime_change():
+    """The overlay must not break the core behaviour: a real downtrend still arms
+    the short ladder once the debounce is satisfied."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100))
+        orch = ExecutorOrchestrator()
+        box = {"data": _range()}
+        cfg = dict(CFG, candle_provider=lambda p: box["data"],
+                   dgrid_flip_confirm_ticks=1,
+                   signal_regime="trend_down", signal_confidence=0.9)
+        c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
+                                  inventory=InventoryRepository(), configs=cfg)
+        await orch.spawn_controller(c)
+        await orch.tick_controller(c.id)
+        assert c.current_phase == "grid"
+        box["data"] = _down()
+        await orch.tick_controller(c.id)
+        assert c.current_phase == "rgrid"
+        event = c.consume_dgrid_event()
+        assert event and event["from"] == "grid" and event["to"] == "rgrid"
+
+    asyncio.run(body())
+
+
+def test_the_overlay_read_reaches_the_controller_through_the_mapped_config():
+    """End-to-end wiring: overlay_actuator writes the signal read into configs,
+    map_strategy_config carries the confidence knob, the controller consumes both."""
+    from src.nadobro.strategy.engine_runtime import map_strategy_config
+
+    cfg = map_strategy_config("dgrid", {"notional_usd": 100.0}, Decimal(100), product="BTC-PERP")
+    assert "dgrid_signal_min_confidence" in cfg
+    c = _dg(signal_regime="trend_down", signal_confidence=0.8,
+            dgrid_signal_min_confidence=cfg["dgrid_signal_min_confidence"])
+    assert c._signal_phase() == "rgrid"
+
+
+# ==========================================================================
+# Live-editable regime knobs (audit 2026-08-06)
+# ==========================================================================
+def test_regime_knobs_are_refreshed_on_a_live_settings_edit():
+    """Every one of these is a Regime-card button. They were read once at
+    __init__, so editing them mid-session changed the card and nothing else until
+    the user stopped and restarted the strategy — a silent no-op."""
+    from src.nadobro.strategy.engine_runtime import _apply_dgrid_controller_config
+
+    c = _dg(dgrid_trend_on_vr=1.25, dgrid_range_on_vr=1.15,
+            dgrid_trend_drift_pct=0.30, dgrid_flip_confirm_ticks=2,
+            dgrid_short_window=4, dgrid_long_window=12,
+            dgrid_reversal_flip_pct=0.4, dgrid_tp_fraction=0.33)
+    _apply_dgrid_controller_config(c, {
+        "dgrid_trend_on_vr": 1.60, "dgrid_range_on_vr": 1.05,
+        "dgrid_trend_drift_pct": 0.15, "dgrid_flip_confirm_ticks": 4,
+        "dgrid_short_window": 3, "dgrid_long_window": 20,
+        "dgrid_reversal_flip_pct": 0.9, "dgrid_tp_fraction": 0.5,
+        "signal_regime": "trend_down", "signal_confidence": 0.8,
+    })
+    assert c.trend_on_vr == 1.60 and c.range_on_vr == 1.05
+    assert c.trend_drift_pct == 0.15 and c.flip_confirm_ticks == 4
+    assert c.short_window == 3 and c.long_window == 20
+    assert c.reversal_flip_pct == 0.9 and c.tp_fraction == 0.5
+    assert c.signal_regime == "trend_down" and c.signal_confidence == 0.8
+
+
+def test_a_live_edit_does_not_reset_the_pending_flip_streak():
+    """Otherwise a user poking at buttons could defer a flip indefinitely."""
+    from src.nadobro.strategy.engine_runtime import _apply_dgrid_controller_config
+
+    c = _dg()
+    c._phase_confirm_streak = 1
+    c.current_phase = "rgrid"
+    _apply_dgrid_controller_config(c, {"dgrid_trend_on_vr": 1.9})
+    assert c._phase_confirm_streak == 1
+    assert c.current_phase == "rgrid"
+
+
+def test_missing_or_malformed_knobs_keep_the_current_value():
+    from src.nadobro.strategy.engine_runtime import _apply_dgrid_controller_config
+
+    c = _dg(dgrid_trend_on_vr=1.25)
+    _apply_dgrid_controller_config(c, {})                        # nothing to apply
+    assert c.trend_on_vr == 1.25
+    _apply_dgrid_controller_config(c, {"dgrid_trend_on_vr": "not a number"})
+    assert c.trend_on_vr == 1.25

@@ -10,6 +10,11 @@ from decimal import Decimal
 from typing import Any
 
 from src.nadobro.utils.env import env_float
+# Blocking work goes to the purpose-built pools, never to the event loop's
+# implicit default executor (only ``cpu_count + 4`` = 5 workers on the 1-CPU
+# production VM, shared with the engine's gateway IO — that contention showed up
+# as skipped APScheduler ticks and multi-second Telegram taps).
+from src.nadobro.core.async_utils import run_blocking_db, run_blocking_sdk
 from src.nadobro.db import execute, query_all, query_one
 from src.nadobro.config import NADO_MAINNET_REST, NADO_TESTNET_REST
 from src.nadobro.core.feature_flags import (
@@ -198,7 +203,7 @@ async def sync_active_users(reason: str = "poll") -> None:
     # former Upstash RedisLock was removed with the rest of the Upstash layer;
     # its synchronous REST round-trips were a source of event-loop starvation.)
     try:
-        rows = await asyncio.to_thread(active_users, _ACTIVE_USERS_PAGE_SIZE, _active_users_cursor)
+        rows = await run_blocking_db(active_users, _ACTIVE_USERS_PAGE_SIZE, _active_users_cursor)
     except Exception as exc:
         logger.warning("portfolio active user query failed: %s", exc)
         return
@@ -269,7 +274,7 @@ async def sync_user(
     force: bool = False,
     max_age_ms: int | None = None,
 ) -> dict[str, Any]:
-    user = await asyncio.to_thread(get_user, int(user_id))
+    user = await run_blocking_db(get_user, int(user_id))
     network = _normalize_network(network or (user.network_mode.value if user else "mainnet"))
     key = _cache_key(user_id, network)
     if key not in _inflight and len(_inflight) > 1000:
@@ -422,7 +427,7 @@ async def sync_user(
             # and DB write downstream gets human symbols. Catalog lookups are
             # cached/static-fallback but may touch the network on a cold
             # cache, so keep them off the event loop.
-            await asyncio.to_thread(_resolve_product_names, positions, all_orders, matches or [], network)
+            await run_blocking_sdk(_resolve_product_names, positions, all_orders, matches or [], network)
             stats = aggregate_trading_stats(matches or [], funding or [])
             spot_balances = ((balance or {}).get("balances") or {}) if isinstance(balance, dict) else {}
             equity = compute_total_equity(summary or {}, spot_balances)
@@ -446,7 +451,7 @@ async def sync_user(
                 "stale": False,
                 "reason": reason,
             }
-            await asyncio.to_thread(_write_snapshot, snapshot, int((time.perf_counter() - started) * 1000))
+            await run_blocking_db(_write_snapshot, snapshot, int((time.perf_counter() - started) * 1000))
             _snapshot_cache[key] = deepcopy(snapshot)
             return deepcopy(snapshot)
         except Exception as exc:
@@ -454,7 +459,7 @@ async def sync_user(
             stale = deepcopy(_snapshot_cache.get(key) or {"user_id": int(user_id), "network": network})
             stale.update({"stale": True, "error": str(exc), "last_error_at": _now(), "monotonic_ts": time.time()})
             _snapshot_cache[key] = deepcopy(stale)
-            await asyncio.to_thread(_write_sync_log_error, int(user_id), network, int((time.perf_counter() - started) * 1000), str(exc))
+            await run_blocking_db(_write_sync_log_error, int(user_id), network, int((time.perf_counter() - started) * 1000), str(exc))
             return stale
 
 

@@ -143,6 +143,20 @@ class DynamicGridController(Controller):
         self.variance_ratio: float = 0.0
         self.realized_move_bp: float = 0.0
         self.last_direction: str = variance_regime.FLAT
+        # Did the last classification actually declare a trend (vs a flat/ranging
+        # verdict with a nonzero drift sign)? Drives the flip notification wording.
+        self.last_is_trend: bool = False
+        # Financial overlay read (strategy/overlay_actuator writes these into the
+        # mapped config each cycle). Advisory only — see _required_confirm_ticks.
+        self.signal_regime: str = str(self.cfg("signal_regime", "") or "")
+        try:
+            self.signal_confidence: float = float(self.cfg("signal_confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            self.signal_confidence = 0.0
+        # Below this the overlay is not confident enough to be worth an extra tick.
+        self.signal_min_confidence: float = float(
+            self.cfg("dgrid_signal_min_confidence", 0.45) or 0.45
+        )
         self._phase_confirm_streak: int = 0
         self._grid_anchor_mid: Optional[Decimal] = None
         self._dgrid_event: Optional[Dict[str, str]] = None
@@ -220,6 +234,12 @@ class DynamicGridController(Controller):
                 "regime; holding phase=%s, will retry next tick",
                 self.trading_pair, self.id, self.current_phase,
             )
+            # Do NOT leave a stale verdict behind. A candle-less tick knows
+            # nothing, and the reversal flip can still fire from price alone — it
+            # would otherwise stamp the PREVIOUS classification's direction/trend
+            # into the user-facing flip event.
+            self.last_is_trend = False
+            self.last_direction = variance_regime.FLAT
             return self.current_phase
         info = await variance_regime.run(
             self.trading_pair, candles,
@@ -241,6 +261,11 @@ class DynamicGridController(Controller):
             or bool(info.get("trend_by_drift"))
             or bool(info.get("holding_trend"))
         )
+        # Remembered for the flip event: ``last_direction`` alone is only
+        # sign(drift), so a -0.001% wobble reads "down" even when the classifier
+        # ruled the market RANGING. Notifications must say "downtrend" only when a
+        # trend was actually declared.
+        self.last_is_trend = is_trend
         if is_trend and self.last_direction == variance_regime.DOWN:
             self.last_regime = "TRENDING_DOWN"
         elif is_trend and self.last_direction == variance_regime.UP:
@@ -366,7 +391,7 @@ class DynamicGridController(Controller):
             flip_needed = desired != self.current_phase
             if flip_needed:
                 self._phase_confirm_streak += 1
-                if self._phase_confirm_streak >= max(1, self.flip_confirm_ticks):
+                if self._phase_confirm_streak >= self._required_confirm_ticks(desired):
                     await self._flip_to(desired, mid, reason="flip")
                     return
             else:
@@ -412,6 +437,41 @@ class DynamicGridController(Controller):
             return
         await self._spawn_phase(desired, mid)
 
+    # -- financial overlay ------------------------------------------------
+    def _signal_phase(self) -> Optional[str]:
+        """The overlay's read expressed as a D-Grid phase, or None when it has no
+        directional opinion (range/chop, or confidence too low to matter)."""
+        if self.signal_confidence < self.signal_min_confidence:
+            return None
+        regime = str(self.signal_regime or "").lower()
+        if regime == "trend_down":
+            return variance_regime.RGRID
+        if regime == "trend_up":
+            return variance_regime.GRID
+        return None
+
+    def _required_confirm_ticks(self, desired: str) -> int:
+        """How many consecutive ticks must agree before we flip.
+
+        A flip is expensive — it closes the live position reduce-only and re-arms
+        the other side — so a wrong one costs a round trip AND puts the book on the
+        wrong side of the move. The variance classifier owns the decision; the
+        financial overlay is a SECOND opinion that can only make the flip more
+        conservative:
+
+        * overlay AGREES with the pending flip → the configured debounce.
+        * overlay CONTRADICTS it (it reads the opposite trend, with confidence) →
+          require one extra confirming tick.
+
+        It can never trigger a flip on its own, and never shorten the debounce
+        below the user's setting: at worst D-Grid waits one tick longer.
+        """
+        base = max(1, self.flip_confirm_ticks)
+        opinion = self._signal_phase()
+        if opinion is not None and opinion != desired:
+            return base + 1
+        return base
+
     # -- spawn / flip ----------------------------------------------------
     async def _flip_to(self, new_phase: str, mid: Optional[Decimal], *, reason: str) -> None:
         old_phase = self.current_phase
@@ -451,6 +511,10 @@ class DynamicGridController(Controller):
                 "to": new_phase,
                 "variance_ratio": f"{self.variance_ratio:.2f}",
                 "direction": self.last_direction,
+                # Did the classifier declare a trend, or is ``direction`` just the
+                # sign of an insignificant drift? The user-facing message reads
+                # very differently for the two.
+                "trending": "1" if self.last_is_trend else "",
                 "reason": reason,
             }
 
