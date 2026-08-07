@@ -16,9 +16,13 @@ leg's *exposure price* is a rolling VWAP over the most recent portion of that
 leg's filled volume (``vwap_volume_fraction``, driven by the user's discretion
 knob), which is a steadier reference than a single last fill.
 
-Fills are TAKER on both legs (:class:`RGridTakerExecutor`; passive-only off) —
-a buy trigger sits ABOVE the market, so a resting post-only order there would be
-rejected, not filled. Crossing the spread is the point: the break is the signal.
+Both legs are POST-ONLY limit orders (:class:`RGridMakerExecutor`) — the standing
+rule for every market-making strategy here is maker-first limit orders, and this
+geometry is maker by construction. A bid parked ABOVE the anchor becomes fillable
+exactly once price has risen past it, because only then is it a resting bid BELOW
+market that a seller can hit; symmetrically for the ask. So the fill IS the
+momentum signal without ever crossing the spread. At most one leg is postable at a
+time (the two conditions are mutually exclusive); inside the band R-Grid waits.
 
 Safety, in layers:
 
@@ -28,13 +32,16 @@ Safety, in layers:
   price barrier too (the units invariant).
 * **Soft reset** — once price has moved favourably by ``reset_threshold_pct`` AND
   the position is in profit, the opposite (exit) leg starts FOLLOWING the trend:
-  it trails the best price by one spread instead of sitting at the entry anchor.
-  The run keeps going; the give-back is capped at one spread. Reduce-only.
-* **Reversal recalibration** — when price breaks the trigger AGAINST the open
-  book, the thesis that opened it is dead: close the WHOLE position reduce-only in
-  one order, re-anchor to mid, and let the next break choose the side. Nibbling a
-  step per tick left most of the position on the wrong side of a running move and
-  paid a taker fee for each nibble.
+  the exit leg is RE-QUOTED to follow the trend instead of resting at the anchor.
+  Bounded by what a maker CAN express: a trailing stop wants to sell below the
+  peak, while a resting post-only ask must sit above the market, so the trailed
+  price is used only when it is both better for us and still postable. Otherwise
+  the anchor-based leg stands (it becomes postable as soon as price falls past it).
+  A true trailing stop would have to cross, so it is out of scope for a maker-only
+  strategy — the session SL/TP rail remains the hard exit.
+* **Reversal recalibration** — the reducing leg always rests the WHOLE position,
+  so a turn books all of it in one fill rather than a step per tick while the move
+  runs. Once flat the window clears and the next move picks the side.
 * **Net-exposure cap** — inherited from MarketMakingController, and never
   disabled. The regime gate ships OFF (it pauses on TRENDS, which is when R-Grid
   must act); the cap, the soft reset and the session rails are the backstops.
@@ -55,13 +62,11 @@ from decimal import ROUND_DOWN, Decimal
 from typing import Deque, Dict, Optional, Tuple
 
 from src.nadobro.engine.controllers.market_making import MarketMakingController
-from src.nadobro.engine.executors.rgrid_taker_executor import (
-    INTENT_ENTRY,
-    INTENT_REVERSAL,
-    INTENT_TRAIL_EXIT,
-    RGridTakerExecutor,
-    build_entry_taker,
-    build_exit_taker,
+from src.nadobro.engine.executors.rgrid_maker_executor import (
+    LEG_ENTRY,
+    LEG_EXIT,
+    RGridMakerExecutor,
+    build_maker_quote,
 )
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import PositionAction, TradeType, _dec
@@ -71,7 +76,9 @@ logger = logging.getLogger(__name__)
 # Retained fills per leg. Large enough that a volume-fraction window has history.
 _FILL_HISTORY = 200
 # Absolute floor on the soft-reset arm: a "profit" smaller than the round-trip
-# taker cost is not profit. 8.6bp = 2 x the 4.3bp all-in taker rate.
+# round-trip cost is not profit. Kept at the TAKER round trip (8.6bp) as a
+# deliberately conservative floor: R-Grid rests maker quotes, so its real cost is
+# lower and this only ever makes the arm harder to reach, never easier.
 _MIN_ARM_PCT = Decimal("0.00086")
 # After this many consecutive refused exits, stop pretending a retry-only posture
 # is safe and say so loudly (the rail still owns the hard stop).
@@ -100,7 +107,11 @@ class RGridController(MarketMakingController):
         # Last mid seen, so grid_metrics() can report drift from the anchor without
         # an extra venue read (the /status card renders it every refresh).
         self._last_mid: Optional[Decimal] = None
-        self._pending_taker_id: Optional[str] = None
+        # One resting post-only quote per side, tracked by side so each leg can be
+        # sized and reduce-only independently (the shared MM ladder cannot express
+        # "one step on the adding side, the whole position on the reducing side").
+        self._resting: Dict[TradeType, str] = {}
+        self._resting_price: Dict[TradeType, Decimal] = {}
         # Exposure-price window as a fraction of each leg's recent fill VOLUME.
         # 0 ⇒ VWAP over the whole retained window.
         self.vwap_volume_fraction = _dec(self.cfg("vwap_volume_fraction", "0") or "0")
@@ -109,10 +120,6 @@ class RGridController(MarketMakingController):
         self.trail_enabled = bool(self.cfg("trail_enabled", True))
         self._trail_peak: Optional[Decimal] = None
         self._trail_armed = False
-        # Consecutive refused exits. Returning early forever on "failed" (the safe
-        # instinct) wedges the strategy: it stops entering AND stops exiting, and
-        # because on_tick returns normally the orchestrator never sees a failure.
-        self._exit_failures = 0
         # Overlay telemetry only — the actuator has already applied its effect to
         # size/spread/exposure in the mapped config before this controller sees it.
         self.signal_regime = str(self.cfg("signal_regime", "") or "")
@@ -153,13 +160,20 @@ class RGridController(MarketMakingController):
             self._leg_fills[leg].append((px, base))
 
     def _absorb_fills(self) -> None:
-        """Fold newly FILLED entry takers into their leg's exposure window.
+        """Fold newly FILLED quotes into their leg's exposure window.
 
-        EXIT fills are excluded on purpose. The window is the price at which the
-        book took risk ON; a reduce-only exit prints at whatever the market
-        offered, and folding it back in drags the anchor toward the exit price —
-        which then re-triggers an entry within a tick of the close, paying two
-        taker legs for no directional edge.
+        BOTH legs are absorbed, and that is essential: the anchor is defined as the
+        average of the buy AND sell exposure prices, so excluding the reducing leg
+        would leave the sell exposure price permanently undefined and the "average"
+        would only ever be the buy VWAP.
+
+        This is safe precisely BECAUSE the quotes are makers. The exclusion existed
+        when exits were market orders: a close printed at whatever the market
+        offered, dragging the anchor to the exit price and re-triggering an entry a
+        tick later. A resting post-only fill happens at a price the strategy CHOSE
+        (anchor x (1 -+ spread), or the trailing price once armed), which is real
+        exposure information — exactly as in Grid, where "a sell that happens to
+        close a long is the strategy working, and must re-anchor".
         """
         for ex in self.my_executors(active_only=False):
             if ex.id in self._seen_filled:
@@ -177,11 +191,6 @@ class RGridController(MarketMakingController):
             if abs(_dec(order.filled_base)) <= 0:
                 continue
             self._seen_filled.add(ex.id)
-            if getattr(ex, "is_exit", False) or (
-                getattr(getattr(ex, "config", None), "position_action", None)
-                is PositionAction.CLOSE
-            ):
-                continue
             base = abs(_dec(order.filled_base))
             quote = abs(_dec(order.filled_quote))
             if base <= 0:
@@ -247,15 +256,7 @@ class RGridController(MarketMakingController):
     def _has_fills(self) -> bool:
         return any(self._leg_fills[leg] for leg in (BUY, SELL))
 
-    # -- taker plumbing ------------------------------------------------------
-    def _taker_in_flight(self) -> bool:
-        if self._pending_taker_id is None:
-            return False
-        ex = self.orchestrator.get(self._pending_taker_id)
-        if ex is None or ex.is_terminated:
-            self._pending_taker_id = None
-            return False
-        return True
+    # -- resting-quote plumbing ----------------------------------------------
 
     def _net_base(self) -> Decimal:
         if self.inventory is None:
@@ -300,19 +301,14 @@ class RGridController(MarketMakingController):
         """Trigger offset from the anchor — the user's spread, fee-floored."""
         return max(self.spread_ask_pct, self.spread_floor_half_pct)
 
-    def _quantize_entry(self, amount_base: Decimal, mid: Decimal) -> Optional[Decimal]:
-        """Round an ENTRY down to the venue's lot size, and refuse it outright if
-        the result is under the venue's minimum notional.
+    def _quantize_quote(self, amount_base: Decimal, price: Decimal) -> Optional[Decimal]:
+        """Round a quote DOWN to the venue lot, and decline it below the venue
+        minimum notional.
 
-        Why refusing beats shipping it: ``NadoClient.place_order`` GROWS a
-        non-reducing order that lands under the minimum up to the venue floor. For
-        an entry that means the size actually traded can exceed the size the risk
-        engine just approved — the step cap, the net-exposure projection and the
-        user's stop budget are all sized against the smaller number. Rounding DOWN
-        to a lot and declining below the floor keeps the venue from ever having to
-        bump us. Exits are not quantized here: a reduce-only close must be able to
-        flatten the exact residual, and the adapter already crosses the spread
-        rather than stranding a sub-minimum exit.
+        ``NadoClient.place_order`` GROWS a non-reducing order that lands under the
+        minimum, so shipping a sub-minimum quote means resting more than the risk
+        engine, the step cap and the stop budget were sized against. Rounding down
+        and declining keeps the venue from ever having to bump us.
         """
         try:
             lot = Decimal(str(self.adapter.lot_size(self.trading_pair) or 0))
@@ -322,107 +318,111 @@ class RGridController(MarketMakingController):
         if lot > 0:
             amount_base = (amount_base / lot).to_integral_value(rounding=ROUND_DOWN) * lot
         if amount_base <= 0:
-            logger.warning(
-                "rgrid: entry of %s rounds to zero at lot %s — skipping the break "
-                "(user=%s pair=%s)", self.order_amount_quote, lot,
-                self.user_id, self.trading_pair,
-            )
             return None
-        if floor_quote > 0 and amount_base * mid < floor_quote:
+        if floor_quote > 0 and amount_base * price < floor_quote:
             logger.warning(
-                "rgrid: entry notional %.2f is below the venue minimum %.2f — "
-                "skipping the break rather than letting the venue grow it past the "
+                "rgrid: quote notional %.2f is below the venue minimum %.2f — not "
+                "resting it rather than letting the venue grow it past the "
                 "risk-approved size (user=%s pair=%s)",
-                float(amount_base * mid), float(floor_quote),
+                float(amount_base * price), float(floor_quote),
                 self.user_id, self.trading_pair,
             )
             return None
         return amount_base
 
-    async def _fire_taker(self, side: TradeType, mid: Decimal, *, intent: str) -> bool:
-        if mid <= 0 or self.order_amount_quote <= 0:
-            return False
-        amount_base = self._quantize_entry(self.order_amount_quote / mid, mid)
-        if amount_base is None:
-            return False
-        cfg = build_entry_taker(
-            self.trading_pair, side, amount_base,
-            leverage=int(self.cfg("leverage", 1) or 1),
-        )
-        ex = RGridTakerExecutor(
-            cfg, user_id=self.user_id, controller_id=self.id,
-            adapter=self.adapter, inventory=self.inventory, intent=intent,
-        )
-        # Ask risk to approve the QUANTIZED notional, not the pre-rounding figure:
-        # the approval must describe the order that is actually sent.
-        if not await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=amount_base * mid)
-        ):
-            return False
-        self._pending_taker_id = ex.id
-        return True
+    def _leg_slot(self, side: TradeType) -> Optional[str]:
+        return self._resting.get(side)
 
-    async def _fire_exit(self, net_base: Decimal, mid: Decimal) -> bool:
-        side = TradeType.SELL if net_base > 0 else TradeType.BUY
-        cfg = build_exit_taker(
-            self.trading_pair, side, abs(net_base),
-            leverage=int(self.cfg("leverage", 1) or 1),
-        )
-        ex = RGridTakerExecutor(
-            cfg, user_id=self.user_id, controller_id=self.id,
-            adapter=self.adapter, inventory=self.inventory, intent=INTENT_TRAIL_EXIT,
-        )
-        if not await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=abs(net_base) * mid)
-        ):
-            return False
-        self._pending_taker_id = ex.id
-        # Deliberately do NOT disarm the trail here. A market close can fill
-        # PARTIALLY, and disarming on the request would leave the remainder
-        # unprotected — it would have to earn a fresh favourable excursion before
-        # the exit re-armed, even though the trend has already turned. Leaving the
-        # trail armed means the next tick keeps reducing until flat; the flat paths
-        # (_maybe_soft_reset's net==0 branch and _reset_exposure_window) own the
-        # disarm, and _taker_in_flight throttles it to one order at a time.
-        return True
+    async def _cancel_leg(self, side: TradeType) -> None:
+        """Drop a resting quote (it moved, or its side is no longer postable)."""
+        ex_id = self._resting.pop(side, None)
+        if ex_id is None:
+            return
+        ex = self.orchestrator.get(ex_id)
+        if ex is not None and not ex.is_terminated:
+            await self.orchestrator.stop(ex_id)
 
-    async def _fire_reversal_flatten(self, net_base: Decimal, mid: Decimal) -> bool:
-        """Close the WHOLE position reduce-only because the break went against it.
+    async def _quote_leg(
+        self, side: TradeType, price: Decimal, amount_base: Decimal, *,
+        leg: str, allowed: bool, mid: Decimal,
+    ) -> None:
+        """Reconcile ONE resting post-only leg against its target price.
 
-        R-Grid adds INTO a move. When price breaks the opposite trigger the thesis
-        that opened the position is invalidated, so the right response is to get
-        flat, re-anchor, and let the NEXT break decide the direction — not to nibble
-        one step off a losing position each tick while the move runs.
-
-        This is the "recalibrate and switch to quoting in that direction" path, and
-        it is why R-Grid does not need to be paused in a regime switch: it exits the
-        stale side itself instead of being stood down mid-position.
-
-        Reduce-only, so it can never open or flip in one order, and never gated on
-        the exposure cap — reducing is always permitted.
+        Mirrors MarketMakingController._reconcile (forget a terminated quote, drop
+        the leg when it is not allowed, hold a resting quote that is still close
+        enough, else cancel and re-place) but sized and reduce-only per leg, which
+        the shared ladder path cannot express.
         """
-        side = TradeType.SELL if net_base > 0 else TradeType.BUY
-        cfg = build_exit_taker(
-            self.trading_pair, side, abs(net_base),
-            leverage=int(self.cfg("leverage", 1) or 1),
+        ex_id = self._resting.get(side)
+        if ex_id is not None:
+            ex = self.orchestrator.get(ex_id)
+            if ex is None or ex.is_terminated:
+                self._resting.pop(side, None)
+                ex_id = None
+        if not allowed or price <= 0 or amount_base <= 0:
+            await self._cancel_leg(side)
+            return
+        # Never send a post-only order that would cross: the venue rejects it
+        # (error_code 2008) and R-Grid must not cross to force a fill.
+        if not self._is_postable(side, price, mid):
+            await self._cancel_leg(side)
+            return
+        # Exposure: include the order we are about to rest, not just filled
+        # inventory. Reducing quotes are always admitted by this check.
+        if not self._projected_order_within_exposure(side, mid, amount_base * price):
+            await self._cancel_leg(side)
+            return
+        if ex_id is not None:
+            resting_px = self._resting_price.get(side)
+            if resting_px is not None and self._price_is_close(resting_px, price):
+                return          # keep queue position — the target barely moved
+            await self._cancel_leg(side)
+
+        quantized = self._quantize_quote(amount_base, price)
+        if quantized is None:
+            return
+        amount_base = quantized
+        reduce_only = leg == LEG_EXIT
+        cfg = build_maker_quote(
+            self.trading_pair, side, amount_base, price,
+            leverage=int(self.cfg("leverage", 1) or 1), reduce_only=reduce_only,
         )
-        ex = RGridTakerExecutor(
+        ex = RGridMakerExecutor(
             cfg, user_id=self.user_id, controller_id=self.id,
-            adapter=self.adapter, inventory=self.inventory, intent=INTENT_REVERSAL,
+            adapter=self.adapter, inventory=self.inventory, leg=leg,
         )
         if not await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=abs(net_base) * mid)
+            ex, ExecutorRequest(
+                order_amount_quote=amount_base * price, reduce_only=reduce_only,
+            )
         ):
+            return
+        self._resting[side] = ex.id
+        self._resting_price[side] = price
+
+    def _is_postable(self, side: TradeType, price: Decimal, mid: Decimal) -> bool:
+        """Can this price rest without crossing? A bid must sit below the market
+        and an ask above it.
+
+        This is what makes the geometry momentum: the buy leg lives at
+        anchor x (1+spread), so it is only postable once price has risen ABOVE it,
+        and the sell leg at anchor x (1-spread) only once price has fallen BELOW
+        it. The two conditions are mutually exclusive, so at most one leg rests at
+        a time and inside the band R-Grid simply waits.
+        """
+        if mid <= 0:
             return False
-        self._pending_taker_id = ex.id
-        logger.info(
-            "rgrid reversal: price broke the opposite trigger at %s against a %s of "
-            "%s — flattening and re-anchoring so the next break sets the side "
-            "(user=%s pair=%s)",
-            mid, "long" if net_base > 0 else "short", abs(net_base),
-            self.user_id, self.trading_pair,
-        )
-        return True
+        return price < mid if side is TradeType.BUY else price > mid
+
+    def _price_is_close(self, resting: Decimal, target: Decimal) -> bool:
+        """Within the configured requote tolerance — leave the order alone.
+        Cancel/replace churn destroys queue position, which is the whole edge of a
+        maker quote."""
+        tol = _dec(self.cfg("price_distance_tolerance", "0.0005") or "0.0005")
+        if target <= 0 or tol <= 0:
+            return False
+        return abs(resting - target) / target <= tol
+
 
     def _overlay_opposes(self, long_side: bool) -> bool:
         """Does the financial overlay read the market against this position?
@@ -437,77 +437,8 @@ class RGridController(MarketMakingController):
         return (regime == "trend_down" and long_side) or (regime == "trend_up" and not long_side)
 
     # -- soft reset ----------------------------------------------------------
-    async def _maybe_soft_reset(self, mid: Decimal) -> str:
-        """The documented soft reset: "when price drifts favorably and you're in
-        profit, the system adjusts the opposite leg to follow the trend and lock in
-        profits".
 
-        Arms once the favourable excursion from the position's own entry reaches
-        ``reset_threshold_pct``; from then on the exit leg trails the best price by
-        one spread. Returns ``"none"`` (caller may add), ``"fired"`` (exit placed)
-        or ``"failed"`` (an exit was WANTED and could not be placed — the caller
-        must NOT add risk in the same tick).
-        """
-        net = self._net_base()
-        if net == 0:
-            self._trail_peak = None
-            self._trail_armed = False
-            return "none"
-        if not self.trail_enabled or self.reset_threshold_pct <= 0 or mid <= 0:
-            return "none"
-        # An arm threshold inside the entry band is not a threshold — the exit
-        # would arm before the break that opened the position is established. But
-        # REFUSING in that case silently removed R-Grid's only non-rail exit: the
-        # overlay scales spread_ask_pct live (spread_mult > 1 for any non-zero
-        # ATR) while reset_threshold_pct is not scaled, and the shipped defaults
-        # sit exactly on the 2 x band boundary — so an ordinary widening disarmed
-        # the trail entirely. Widen the ARM instead of disabling the mechanism.
-        # (Audit 2026-08-06.)
-        band = self._band()
-        arm_pct = max(self.reset_threshold_pct, band * Decimal(2), _MIN_ARM_PCT)
-        entry = self._position_entry_price() or self.exposure_anchor(mid)
-        if entry is None or entry <= 0:
-            return "none"
-        long_side = net > 0
-        excursion = ((mid - entry) / entry) if long_side else ((entry - mid) / entry)
-        # Track the extreme every tick (even pre-arm) so the trail starts from the
-        # true peak, not from wherever price sat when the threshold was crossed.
-        if self._trail_peak is None:
-            self._trail_peak = mid
-        elif long_side:
-            self._trail_peak = max(self._trail_peak, mid)
-        else:
-            self._trail_peak = min(self._trail_peak, mid)
-        if not self._trail_armed:
-            # The overlay reading the market AGAINST this position does not pause
-            # R-Grid — it arms the exit early, so a position the signal disagrees
-            # with starts protecting its profit immediately instead of waiting for
-            # the full threshold. Still requires an actual profit: arming underwater
-            # would turn the trail into a stop that front-runs the SL rail.
-            opposed = self._overlay_opposes(long_side)
-            if excursion < arm_pct and not (opposed and excursion > 0):
-                return "none"
-            self._trail_armed = True
-            logger.info(
-                "rgrid soft reset armed%s: %s%% favourable from %s — the exit leg now "
-                "follows the trend (user=%s pair=%s)",
-                " EARLY (overlay reads the market against this position)" if opposed else "",
-                round(float(excursion) * 100, 3), entry, self.user_id, self.trading_pair,
-            )
-        trigger = (
-            self._trail_peak * (Decimal(1) - band) if long_side
-            else self._trail_peak * (Decimal(1) + band)
-        )
-        if (mid > trigger) if long_side else (mid < trigger):
-            return "none"   # trend intact — keep following it
-        logger.info(
-            "rgrid soft reset: trend stalled at %s (peak %s, trail %s) — banking the "
-            "%s (user=%s pair=%s)",
-            mid, self._trail_peak, trigger, "long" if long_side else "short",
-            self.user_id, self.trading_pair,
-        )
-        return "fired" if await self._fire_exit(net, mid) else "failed"
-
+    # -- tick ----------------------------------------------------------------
     # -- tick ----------------------------------------------------------------
     async def on_tick(self) -> None:
         # Absorb fills BEFORE pricing: the anchor is defined by them.
@@ -522,77 +453,126 @@ class RGridController(MarketMakingController):
         if self._anchor is None:
             self._anchor = mid
 
-        base_value = self._base_value(mid)
         exposure = self.exposure_allowed_sides(self.trading_pair, mid)
         allow_buy, allow_sell = exposure["buy"], exposure["sell"]
-        # The gate ships OFF for R-Grid; when an operator or the overlay arms it,
-        # honour it as reduce-only rather than a full stop.
+        # The gate ships OFF for R-Grid; when an operator arms it, honour it as
+        # reduce-only rather than a full stop.
         await self.evaluate_quote_gate(self.trading_pair)
+        net = self._net_base()
         if self.gate_paused:
-            allow_buy = allow_buy and base_value < 0     # only reduce a short
-            allow_sell = allow_sell and base_value > 0   # only reduce a long
+            allow_buy = allow_buy and net < 0     # only reduce a short
+            allow_sell = allow_sell and net > 0   # only reduce a long
 
-        # One taker at a time: let the previous order settle (and be absorbed into
-        # the anchor) before considering the next step.
-        if self._taker_in_flight():
-            return
-
-        outcome = await self._maybe_soft_reset(mid)
-        if outcome == "fired":
-            self._exit_failures = 0
-            return
-        if outcome == "failed":
-            # A close we could not place must NOT fall through into the add branch:
-            # piling risk onto a position we just failed to reduce is the wrong
-            # default for a safety action. But returning early FOREVER wedges the
-            # strategy — it stops exiting AND stops entering, and on_tick returning
-            # normally means the orchestrator never sees a failure. Bound it, shout,
-            # and let the session SL/TP rail be the backstop past that.
-            self._exit_failures += 1
-            if self._exit_failures <= _MAX_CONSECUTIVE_EXIT_FAILURES:
-                logger.warning(
-                    "rgrid: soft-reset exit was refused (%s/%s) — skipping the add "
-                    "branch this tick (user=%s pair=%s)",
-                    self._exit_failures, _MAX_CONSECUTIVE_EXIT_FAILURES,
-                    self.user_id, self.trading_pair,
-                )
-                return
-            logger.error(
-                "rgrid: soft-reset exit refused %s ticks running (user=%s pair=%s) — "
-                "the position cannot be reduced by this controller; the session "
-                "SL/TP rail is now the only exit",
-                self._exit_failures, self.user_id, self.trading_pair,
-            )
-            return
-        self._exit_failures = 0
-
-        # Flat again after banking: the window still holds the OLD entries, whose
-        # average sits far from the new mid — enough on its own to breach the band
-        # and re-enter immediately. Require a genuine fresh break instead.
-        if self._net_base() == 0 and self._has_fills():
+        # Flat and holding stale entries: the closed position's prices still
+        # anchor us, and their average sits far from the new mid. Re-anchor so a
+        # genuine fresh move is required.
+        if net == 0 and self._has_fills():
             self._reset_exposure_window(mid)
 
         anchor = self.exposure_anchor(mid)
         if anchor is None or anchor <= 0:
+            await self._cancel_leg(TradeType.BUY)
+            await self._cancel_leg(TradeType.SELL)
             return
         self._last_anchor = anchor
         band = self._band()
-        buy_trigger = anchor * (Decimal(1) + band)
-        sell_trigger = anchor * (Decimal(1) - band)
-        net = self._net_base()
-        if mid >= buy_trigger:
-            if net < 0:
-                # Short book, price broke UP: the move that opened it has turned.
-                # Get flat in ONE order and re-anchor — nibbling a step per tick
-                # leaves most of the position on the wrong side of a running move.
-                await self._fire_reversal_flatten(net, mid)
-            elif allow_buy:
-                await self._fire_taker(TradeType.BUY, mid, intent=INTENT_ENTRY)
-        elif mid <= sell_trigger:
-            if net > 0:
-                await self._fire_reversal_flatten(net, mid)   # long book, break DOWN
-            elif allow_sell:
-                await self._fire_taker(TradeType.SELL, mid, intent=INTENT_ENTRY)
+
+        # The two legs. Mirror of Grid: the BUY sits ABOVE the anchor and the SELL
+        # BELOW it, so each becomes postable only once price has travelled past it
+        # — that is the momentum. At most one is postable at a time.
+        buy_price = anchor * (Decimal(1) + band)
+        sell_price = anchor * (Decimal(1) - band)
+
+        # Soft reset. Once armed the EXIT leg is re-quoted to follow the trend
+        # rather than sitting at the anchor.
+        #
+        # LIMITATION, deliberate and guarded: a trailing exit wants to sell BELOW
+        # the peak (a stop), and a resting post-only ask must be ABOVE the market.
+        # At the peak those are contradictory, so the trailed price is simply not
+        # postable and applying it would cancel the leg and leave the position with
+        # NO resting exit at all — strictly worse than the anchor-based leg, which
+        # is postable as soon as price falls past it. So the trail is applied only
+        # when it is BOTH better for us and still postable; otherwise the
+        # anchor-based leg stands. (A true trailing stop is not expressible as a
+        # maker order; see the note in the module docstring.)
+        self._track_trail(mid, net)
+        if self._trail_armed and net != 0:
+            trailed = self._trail_price(net)
+            if net > 0 and trailed > sell_price and self._is_postable(TradeType.SELL, trailed, mid):
+                sell_price = trailed
+            elif net < 0 and trailed < buy_price and self._is_postable(TradeType.BUY, trailed, mid):
+                buy_price = trailed
+
+        # Sizing: the ADDING leg rests one step; the REDUCING leg rests the whole
+        # position, so a turn books all of it in one fill instead of a step per
+        # tick while the move runs.
+        step_base = (self.order_amount_quote / mid) if mid > 0 else Decimal(0)
+        buy_amount = abs(net) if net < 0 else step_base
+        sell_amount = abs(net) if net > 0 else step_base
+        buy_leg = LEG_EXIT if net < 0 else LEG_ENTRY
+        sell_leg = LEG_EXIT if net > 0 else LEG_ENTRY
+
+        await self._quote_leg(
+            TradeType.BUY, buy_price, buy_amount,
+            leg=buy_leg, allowed=allow_buy, mid=mid,
+        )
+        await self._quote_leg(
+            TradeType.SELL, sell_price, sell_amount,
+            leg=sell_leg, allowed=allow_sell, mid=mid,
+        )
+
+    def _track_trail(self, mid: Decimal, net: Decimal) -> None:
+        """Update the favourable extreme and the armed flag. No orders here — the
+        exit leg's PRICE is the mechanism, so arming only changes where it rests."""
+        if net == 0:
+            self._trail_peak = None
+            self._trail_armed = False
+            return
+        if not self.trail_enabled or self.reset_threshold_pct <= 0 or mid <= 0:
+            return
+        long_side = net > 0
+        if self._trail_peak is None:
+            self._trail_peak = mid
+        elif long_side:
+            self._trail_peak = max(self._trail_peak, mid)
+        else:
+            self._trail_peak = min(self._trail_peak, mid)
+        if self._trail_armed:
+            return
+        entry = self._position_entry_price() or self.exposure_anchor(mid)
+        if entry is None or entry <= 0:
+            return
+        excursion = ((mid - entry) / entry) if long_side else ((entry - mid) / entry)
+        band = self._band()
+        # The arm is WIDENED to clear the band and the round-trip cost, never
+        # disabled: the overlay scales the spread live while the threshold is not
+        # scaled, and the shipped defaults sit on the boundary, so refusing would
+        # have silently removed the mechanism.
+        arm_pct = max(self.reset_threshold_pct, band * Decimal(2), _MIN_ARM_PCT)
+        # An overlay read AGAINST the position arms early rather than pausing
+        # R-Grid — but never underwater, or the trail becomes a stop that
+        # front-runs the SL rail.
+        opposed = self._overlay_opposes(long_side)
+        if excursion < arm_pct and not (opposed and excursion > 0):
+            return
+        self._trail_armed = True
+        logger.info(
+            "rgrid soft reset armed%s: %s%% favourable from %s — the exit leg now "
+            "follows the trend (user=%s pair=%s)",
+            " EARLY (overlay reads the market against this position)" if opposed else "",
+            round(float(excursion) * 100, 3), entry, self.user_id, self.trading_pair,
+        )
+
+    def _trail_price(self, net: Decimal) -> Decimal:
+        """Where the armed exit leg rests: one band back from the best price seen.
+        Give-back is capped at one spread and it only ever ratchets forward."""
+        peak = self._trail_peak or Decimal(0)
+        band = self._band()
+        return (
+            peak * (Decimal(1) - band) if net > 0
+            else peak * (Decimal(1) + band)
+        )
+
 
     # -- introspection -------------------------------------------------------
     def anchor_state(self) -> dict:

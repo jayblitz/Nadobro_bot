@@ -1299,7 +1299,9 @@ def map_strategy_config(
             # recognising this as the exposure-anchored family.
             "controller_override": "fill_anchored",
             "anchor_mode": "rgrid",
-            "momentum": True,          # taker on both legs; passive-only is OFF
+            # Maker on both legs, post-only. Kept as an explicit key so a config
+            # dump shows the execution model rather than implying it.
+            "passive_only": True,
             "trail_enabled": True,     # the documented soft reset
             "reset_threshold_pct": Decimal(str(_reset_pct)) / Decimal(100),
             # The trigger offset from the exposure average, per leg.

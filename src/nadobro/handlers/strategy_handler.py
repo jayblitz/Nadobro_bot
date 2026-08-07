@@ -1630,10 +1630,14 @@ def rgrid_stop_headroom(conf: dict, sl_pct_val: float) -> dict:
     """How much room the session stop leaves R-Grid to trade, AFTER the step cap.
 
     SL/TP are % of MARGIN and the rail judges live PnL NET of fees, so the real
-    question is not "is 1% a sensible stop" but "how many taker round trips fit
-    inside 1% of my margin before the stop fires on costs alone". The engine now
-    caps the step so at least ~3 do; this reports the resulting numbers, and flags
-    the one case the cap cannot fix.
+    question is not "is 1% a sensible stop" but "how many round trips fit inside 1%
+    of my margin before the stop fires on costs alone". The engine caps the step so
+    at least ~3 do; this reports the resulting numbers and flags the one case the
+    cap cannot fix.
+
+    Costed at the TAKER round trip on purpose. R-Grid rests post-only quotes, so its
+    real cost is lower — pricing the bound conservatively means the displayed
+    headroom is a floor, never an overstatement.
     """
     margin, plan = rgrid_step_plan(conf, sl_pct_val)
     budget = float(plan.stop_budget_usd)
@@ -1669,7 +1673,7 @@ def _rgrid_step_cap_note(conf: dict, sl_pct_val: float) -> str:
         if room["ratio"] >= 1.0:
             return (
                 f"\n\n🚨 *Stop too tight to trade\\.* The smallest step the venue "
-                f"accepts \\({step}\\) costs {fee} per taker round trip — more than "
+                f"accepts \\({step}\\) costs {fee} per round trip — more than "
                 f"your whole {budget} stop budget, so the session stops out on fees "
                 "alone whichever way price goes\\. Raise the PnL stop or add margin\\."
             )
@@ -1685,7 +1689,7 @@ def _rgrid_step_cap_note(conf: dict, sl_pct_val: float) -> str:
         trips = escape_md(f"{room['round_trips']:.0f}")
         return (
             f"\n\n🛡 Step capped to *{step}* per break \\(from {uncapped}\\) so your "
-            f"stop budget covers about {trips} taker round trips\\. Raise the PnL "
+            f"stop budget covers about {trips} round trips\\. Raise the PnL "
             "stop or lower leverage to trade larger steps\\."
         )
     return ""
@@ -1934,7 +1938,7 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             _budget_line = (
                 f"Stop budget: *{_budget_txt}* "
                 f"\\({escape_md(pnl_sl)} of {_margin_txt} margin\\)\n"
-                f"Step: *{_step_txt}* per break \\| Taker round trip: *{_rt_txt}*\n"
+                f"Step: *{_step_txt}* per break \\| Round trip \\(worst case\\): *{_rt_txt}*\n"
                 if _room["budget_usd"] > 0 else ""
             )
             return (
@@ -1943,9 +1947,10 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 f"PnL take profit: *{escape_md(pnl_tp)}*\n"
                 f"{_budget_line}\n"
                 "Both are % of MARGIN, measured on live PnL \\(realized \\+ open\\) "
-                "NET of fees — not raw market drift\\. R\\-Grid crosses the spread on "
-                "both legs, so its costs are charged against the same budget, and the "
-                "size per break is capped to fit inside it\\."
+                "NET of fees — not raw market drift\\. R\\-Grid rests post\\-only "
+                "limit orders on both legs, so it earns the spread rather than "
+                "paying it; the size per break is still capped so even a worst\\-case "
+                "spread\\-crossing round trip would fit inside that budget\\."
                 f"{_rgrid_step_cap_note(conf, _sl_val)}"
             )
         if section == "reset":
@@ -1991,10 +1996,11 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             f"Levels: *{escape_md(levels)}* \\| Spread: *{escape_md(rgrid_spread)}*\n"
             f"POV: *{escape_md(pov_label)}*\n"
             f"{_mm_sizing_line(conf)}\n\n"
-            "Both legs sit one spread either side of the *average of your buy and "
-            "sell exposure prices*: it buys as price rises above that, sells as it "
-            "falls below\\. Fills are taker, so a break is actually captured\\. "
-            "Profits in trends, stalls in chop — the mirror of GRID\\. "
+            "Both legs rest as *post\\-only limit orders* one spread either side of "
+            "the *average of your buy and sell exposure prices* — the buy ABOVE it, "
+            "the sell BELOW\\. Each becomes fillable once price has travelled past "
+            "it, so you buy into strength and sell into weakness without ever paying "
+            "the spread\\. Profits in trends, waits in chop — the mirror of GRID\\. "
             "*Position size \\= margin × leverage*\\."
         )
 

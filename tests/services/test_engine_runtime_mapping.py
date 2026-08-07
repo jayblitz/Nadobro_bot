@@ -96,7 +96,7 @@ def test_map_rgrid_is_exposure_anchored_with_no_static_band():
         cfg = er.map_strategy_config("rgrid", settings, Decimal(100), product="BTC-USDC")
         assert cfg["controller_override"] == "fill_anchored"
         assert cfg["anchor_mode"] == "rgrid"
-        assert cfg["momentum"] is True, "R-Grid takes the break (passive only is off)"
+        assert cfg["passive_only"] is True, "every MM strategy rests post-only limits"
         # No static ladder geometry, and no phase-switcher knobs.
         for dead in ("start_price", "end_price", "dgrid_trend_on_vr", "dgrid_flip_confirm_ticks"):
             assert dead not in cfg, dead
@@ -292,7 +292,7 @@ def test_grid_defaults_to_a_recycling_ladder_rgrid_never_does():
     r_def = er.map_strategy_config(
         "rgrid", {"notional_usd": 100.0, "levels": 3}, Decimal(58000), product="BTC-USDC",
     )
-    assert r_def["controller_override"] == "fill_anchored" and r_def["momentum"] is True
+    assert r_def["controller_override"] == "fill_anchored" and r_def["passive_only"] is True
     assert "recycle_levels" not in r_def, "no resting ladder to recycle"
 
 
@@ -1055,19 +1055,16 @@ def test_mid_resurrects_the_levels_input_without_changing_deployment():
     assert one["ladder_levels"] == 1
 
 
-def test_rgrid_momentum_is_excluded_from_the_ladder():
-    """rgrid fires ONE taker per break rather than resting a ladder. Handing it
-    the full side deployment would multiply its step size by ``levels``."""
-    settings = {"notional_usd": 1000.0, "levels": 4, "fill_anchored": 1}
-    rg = er.map_strategy_config("rgrid", settings, Decimal("1000"), product="BTC-PERP", leverage=1)
-    assert rg["momentum"] is True
-    assert rg["ladder_levels"] == 1, "rgrid must not ladder"
-    assert rg["order_amount_quote"] == Decimal("250"), "per-step taker size changed"
-
-    gr = er.map_strategy_config("grid", settings, Decimal("1000"), product="BTC-PERP", leverage=1)
-    assert gr["momentum"] is False
-    assert gr["ladder_levels"] == 4
-    assert gr["order_amount_quote"] == Decimal("1000")
+def test_rgrid_rests_one_quote_per_side_not_a_ladder():
+    """R-Grid quotes exactly two prices (anchor +- spread), so handing it the
+    multi-level ladder would multiply its deployed size by ``levels`` while it only
+    ever rests one quote per side."""
+    rg = er.map_strategy_config(
+        "rgrid", {"notional_usd": 100.0, "levels": 4}, Decimal(58000), product="BTC-USDC",
+    )
+    assert rg["ladder_levels"] == 1
+    assert "ladder_step_bp" not in rg and "ladder_curve" not in rg
+    assert rg["passive_only"] is True
 
 
 def test_min_quote_lifetime_tracks_the_actual_cadence():

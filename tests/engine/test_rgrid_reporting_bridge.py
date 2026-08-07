@@ -5,7 +5,7 @@ strategy_sessions tables so /status, fills, and portfolio views show real number
 — keep that bridge in sync when touching fill handling."
 
 R-Grid moved to its OWN controller and its OWN executor class
-(RGridTakerExecutor), so this pins that the bridge is class-agnostic and that
+(RGridMakerExecutor), so this pins that the bridge is class-agnostic and that
 every kind of R-Grid fill — the break entry, the trailing exit and the reversal
 flatten — still reaches the recorder with a digest, a side and a size.
 
@@ -21,7 +21,7 @@ from decimal import Decimal
 from tests.engine._mock_nado import MockNadoAdapter
 
 from src.nadobro.engine.controllers.rgrid import RGridController
-from src.nadobro.engine.executors.rgrid_taker_executor import RGridTakerExecutor
+from src.nadobro.engine.executors.rgrid_maker_executor import RGridMakerExecutor
 from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.orchestrator import ExecutorOrchestrator
 from src.nadobro.engine.types import OrderType, TradeType
@@ -52,6 +52,19 @@ class _SpyRecorder:
         self.placements.append((controller_id, order_id))
 
 
+async def _walk(orch, c, adapter, prices):
+    """Tick through a price path, filling whatever R-Grid rests. Maker quotes do
+    not auto-fill, so the fill has to be driven explicitly."""
+    await orch.tick_controller(c.id)              # establish the anchor
+    for px in prices:
+        adapter.set_mid(Decimal(px))
+        await orch.tick_controller(c.id)
+        for o in list(adapter.placed):
+            if o.filled_base == 0:
+                adapter.fill_order(o.id)
+        await orch.tick_controller(c.id)
+
+
 def _controller(adapter, recorder, extra=None):
     configs = {
         "trading_pair": PAIR,
@@ -75,10 +88,7 @@ def test_a_break_entry_reaches_the_reporting_bridge():
         rec = _SpyRecorder()
         orch, c = _controller(adapter, rec)
         await orch.spawn_controller(c)
-        await orch.tick_controller(c.id)
-        adapter.set_mid(Decimal("101"))
-        await orch.tick_controller(c.id)          # break up -> taker BUY
-        await orch.tick_controller(c.id)          # settle
+        await _walk(orch, c, adapter, ["101"])    # rests a bid at 100.1, filled
 
         assert rec.rows, "the entry fill never reached the bridge"
         row = rec.rows[0]
@@ -102,20 +112,13 @@ def test_the_trailing_exit_reaches_the_bridge_too():
             "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
         })
         await orch.spawn_controller(c)
-        await orch.tick_controller(c.id)
-        adapter.set_mid(Decimal("101"))
-        await orch.tick_controller(c.id)
-        await orch.tick_controller(c.id)
+        await _walk(orch, c, adapter, ["101"])    # long on the resting bid
         entries = len(rec.rows)
         assert entries >= 1
 
-        adapter.set_mid(Decimal("108"))
-        await orch.tick_controller(c.id)          # arms the trail
-        adapter.set_mid(Decimal("107"))
-        await orch.tick_controller(c.id)          # trailing exit fires
-        await orch.tick_controller(c.id)          # settle
+        await _walk(orch, c, adapter, ["108", "107"])   # arm, then the exit rests+fills
 
-        assert len(rec.rows) > entries, "the trailing exit never reached the bridge"
+        assert len(rec.rows) > entries, "the reducing leg never reached the bridge"
         assert rec.rows[-1]["side"] is TradeType.SELL
         assert rec.rows[-1]["order_digest"]
 
@@ -128,25 +131,20 @@ def test_the_reversal_flatten_reaches_the_bridge():
         rec = _SpyRecorder()
         orch, c = _controller(adapter, rec)
         await orch.spawn_controller(c)
-        await orch.tick_controller(c.id)
-        adapter.set_mid(Decimal("104"))
-        await orch.tick_controller(c.id)
-        await orch.tick_controller(c.id)
+        await _walk(orch, c, adapter, ["104"])
         entries = len(rec.rows)
 
-        adapter.set_mid(Decimal("100"))           # break against the long
-        await orch.tick_controller(c.id)
-        await orch.tick_controller(c.id)
-        assert len(rec.rows) > entries, "the reversal flatten never reached the bridge"
+        await _walk(orch, c, adapter, ["100"])    # price back through the sell leg
+        assert len(rec.rows) > entries, "the reducing leg never reached the bridge"
         assert rec.rows[-1]["side"] is TradeType.SELL
 
     asyncio.run(body())
 
 
-def test_every_rgrid_fill_is_recorded_as_a_taker():
-    """R-Grid crosses on BOTH legs. The bridge defaulted is_taker to False and
-    nothing downstream corrected it, so a taker-only strategy reported 100% maker
-    fills — wrong in every fee/maker-taker surface."""
+def test_every_rgrid_fill_is_recorded_as_a_maker():
+    """R-Grid rests post-only quotes on both legs, so every bridged row must read
+    maker. The flag is derived from the order type now (it used to be hardcoded
+    False, which was right here by accident and wrong for the taker Volume bot)."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
         rec = _SpyRecorder()
@@ -154,24 +152,19 @@ def test_every_rgrid_fill_is_recorded_as_a_taker():
             "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
         })
         await orch.spawn_controller(c)
-        await orch.tick_controller(c.id)
-        for px in ("101", "108", "107"):
-            adapter.set_mid(Decimal(px))
-            await orch.tick_controller(c.id)
-            await orch.tick_controller(c.id)
+        await _walk(orch, c, adapter, ["101", "108", "107"])
 
         assert rec.rows, "expected fills"
-        assert all(r["is_taker"] is True for r in rec.rows), (
-            "a taker-only strategy reported maker fills"
+        assert all(r["is_taker"] is False for r in rec.rows), (
+            "a maker-only strategy reported taker fills"
         )
-        # And the orders really were market orders.
-        assert all(o.order_type is OrderType.MARKET for o in adapter.placed)
+        assert all(o.order_type is OrderType.LIMIT_MAKER for o in adapter.placed)
 
     asyncio.run(body())
 
 
 def test_the_recorder_is_injected_into_the_new_executor_class():
-    """The orchestrator injects the recorder at spawn. RGridTakerExecutor is a new
+    """The orchestrator injects the recorder at spawn. RGridMakerExecutor is a new
     class; if injection were class-gated, R-Grid would go dark on every surface."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
@@ -183,8 +176,8 @@ def test_the_recorder_is_injected_into_the_new_executor_class():
         await orch.tick_controller(c.id)
 
         takers = [e for e in c.my_executors(active_only=False)
-                  if isinstance(e, RGridTakerExecutor)]
-        assert takers, "expected an RGridTakerExecutor"
+                  if isinstance(e, RGridMakerExecutor)]
+        assert takers, "expected an RGridMakerExecutor"
         assert all(e.trade_recorder is rec for e in takers), (
             "the recorder was not injected into R-Grid's executor"
         )
@@ -214,10 +207,7 @@ def test_the_bridge_survives_a_recorder_that_raises():
         adapter = MockNadoAdapter(mid=Decimal(100))
         orch, c = _controller(adapter, _Broken())
         await orch.spawn_controller(c)
-        await orch.tick_controller(c.id)
-        adapter.set_mid(Decimal("101"))
-        await orch.tick_controller(c.id)
-        await orch.tick_controller(c.id)
+        await _walk(orch, c, adapter, ["101"])
         # The fill still landed in inventory even though reporting blew up.
         assert c._net_base() > 0
         assert c._has_fills()

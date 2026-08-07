@@ -1,9 +1,10 @@
 """R-Grid step sizing against the stop budget. Pure math — no I/O, no config.
 
-Reverse Grid crosses the spread on BOTH legs by design, and it trades
-``margin x leverage / levels`` per break. The session stop is a % of MARGIN
-judged NET of fees, so leverage buys size but not stop budget — and past a point
-the two collide:
+Reverse Grid trades ``margin x leverage / levels`` per step. The session stop is a
+% of MARGIN judged NET of fees, so leverage buys size but not stop budget — and
+past a point the two collide. The bound below is priced at the TAKER round trip
+even though R-Grid rests makers: it is a risk bound, and the cheaper real cost
+must only ever leave MORE headroom than assumed, never less:
 
     $100 margin, 49x, 4 levels  →  $1,225 per break
     one taker round trip         →  $1,225 x 8.6bp = $1.05
@@ -36,9 +37,15 @@ from src.nadobro.quant.vol_fee_estimator import (
     DEFAULT_SPOT_TAKER_FEE_RATE,
 )
 
-# All-in taker rate actually charged: catalog base + the 1bp builder routing that
-# policy locks on. Both legs cross, so a round trip pays it twice.
+# All-in TAKER rate actually charged: catalog base + the 1bp builder routing that
+# policy locks on.
 TAKER_ALL_IN_RATE = DEFAULT_SPOT_TAKER_FEE_RATE + DEFAULT_BUILDER_FEE_RATE   # 4.3 bp
+# R-Grid rests POST-ONLY quotes on both legs, so it does not pay the taker rate.
+# The cap is still computed against the taker round trip on purpose: it is a
+# RISK bound, and sizing it against the cheaper maker cost would let the step grow
+# until an unexpected taker fill (a venue-side conversion, an escalated exit, a
+# future edit) no longer fitted inside the stop. Conservative by construction —
+# the real maker cost leaves strictly more headroom than the cap assumes.
 TAKER_ROUND_TRIP_RATE = TAKER_ALL_IN_RATE * Decimal(2)                        # 8.6 bp
 
 # One round trip may eat at most this share of the stop budget ⇒ at least three

@@ -72,6 +72,9 @@ class ExecutorRequest:
 
     order_amount_quote: Decimal
     position_size_quote: Decimal = Decimal(0)
+    # True when this order can only SHRINK exposure (reduce-only / a close). A risk
+    # LIMIT must never block risk REDUCTION, so the size gates below skip it.
+    reduce_only: bool = False
 
     def __post_init__(self) -> None:
         self.order_amount_quote = _dec(self.order_amount_quote)
@@ -134,14 +137,22 @@ class RiskEngine:
             and state.executor_count >= lim.max_open_executors
         ):
             return False, "max_open_executors"
-        if (
-            lim.max_single_order_quote is not None
-            and request.order_amount_quote > lim.max_single_order_quote
-        ):
-            return False, "max_single_order_quote"
-        if (
-            lim.max_position_size_quote is not None
-            and request.position_size_quote > lim.max_position_size_quote
-        ):
-            return False, "max_position_size_quote"
+        # SIZE gates apply to orders that ADD exposure. A reduce-only order is the
+        # thing that gets a user OUT, and it is legitimately larger than one entry
+        # step whenever a position was built from several — R-Grid rests the whole
+        # position on its reducing leg, so gating it here refused the exit exactly
+        # when it mattered and left the book unable to shrink. The exposure check
+        # (market_making._projected_order_within_exposure) already exempts reducers
+        # for the same reason; this makes the two consistent.
+        if not request.reduce_only:
+            if (
+                lim.max_single_order_quote is not None
+                and request.order_amount_quote > lim.max_single_order_quote
+            ):
+                return False, "max_single_order_quote"
+            if (
+                lim.max_position_size_quote is not None
+                and request.position_size_quote > lim.max_position_size_quote
+            ):
+                return False, "max_position_size_quote"
         return True, None
