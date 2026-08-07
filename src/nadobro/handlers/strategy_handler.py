@@ -1948,9 +1948,9 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 f"{_budget_line}\n"
                 "Both are % of MARGIN, measured on live PnL \\(realized \\+ open\\) "
                 "NET of fees — not raw market drift\\. R\\-Grid rests post\\-only "
-                "limit orders on both legs, so it earns the spread rather than "
-                "paying it; the size per break is still capped so even a worst\\-case "
-                "spread\\-crossing round trip would fit inside that budget\\."
+                "limit orders, so it earns the spread rather than paying it; only the "
+                "trailing stop crosses\\. The size per break is capped so even a "
+                "worst\\-case crossing round trip fits inside that budget\\."
                 f"{_rgrid_step_cap_note(conf, _sl_val)}"
             )
         if section == "reset":
@@ -1981,11 +1981,13 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
                 f"Arms after: *{escape_md(reset_threshold)}* favourable move{_tp_note}\n"
                 f"Discretion: *{escape_md(discretion)}* \\(exposure VWAP window\\)\n\n"
                 "R\\-Grid adds INTO a trend\\. Once the move has gone this far your "
-                "way *and* you are in profit, the exit leg starts FOLLOWING the "
-                "trend — it trails the best price by one spread instead of sitting "
-                "at your entry, so the run keeps going and the profit is locked\\. "
+                "way *and* you are in profit, the exit starts FOLLOWING the trend — "
+                "one spread behind the best price, instead of sitting at your entry, "
+                "so the run keeps going and the profit is locked\\. A pullback that "
+                "stops short of it is booked by the resting limit; once price comes "
+                "back THROUGH it the stop crosses and closes the whole position\\. "
                 "Range 0\\.1–10%\\. Set it clear of the entry band or the exit would "
-                "arm before the break that opened the position is established\\."
+                "arm before the move that opened the position is established\\."
             )
         levels = str(int(conf.get("levels", 4)))
         rgrid_spread = f"{float(conf.get('rgrid_spread_bp', spread_bp)):.1f} bp"
@@ -2001,6 +2003,7 @@ def _strategy_config_section_text(strategy: str, conf: dict, network: str, secti
             "the sell BELOW\\. Each becomes fillable once price has travelled past "
             "it, so you buy into strength and sell into weakness without ever paying "
             "the spread\\. Profits in trends, waits in chop — the mirror of GRID\\. "
+            "The trailing stop is the one order that crosses\\. "
             "*Position size \\= margin × leverage*\\."
         )
 

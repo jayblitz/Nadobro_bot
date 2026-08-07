@@ -141,10 +141,9 @@ def test_the_reversal_flatten_reaches_the_bridge():
     asyncio.run(body())
 
 
-def test_every_rgrid_fill_is_recorded_as_a_maker():
-    """R-Grid rests post-only quotes on both legs, so every bridged row must read
-    maker. The flag is derived from the order type now (it used to be hardcoded
-    False, which was right here by accident and wrong for the taker Volume bot)."""
+def test_maker_fills_report_maker_and_the_crossing_stop_reports_taker():
+    """The flag is derived from the order type, so the mixed execution model is
+    reported honestly: resting quotes are maker, the trailing stop is a taker."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100))
         rec = _SpyRecorder()
@@ -155,10 +154,14 @@ def test_every_rgrid_fill_is_recorded_as_a_maker():
         await _walk(orch, c, adapter, ["101", "108", "107"])
 
         assert rec.rows, "expected fills"
-        assert all(r["is_taker"] is False for r in rec.rows), (
-            "a maker-only strategy reported taker fills"
-        )
-        assert all(o.order_type is OrderType.LIMIT_MAKER for o in adapter.placed)
+        makers = [r for r in rec.rows if r["is_taker"] is False]
+        takers = [r for r in rec.rows if r["is_taker"] is True]
+        assert makers, "the resting quotes should report maker"
+        # Exactly the crossing orders report taker, and there is at most one stop.
+        crossing = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        assert len(takers) == len(crossing)
+        assert all(o.order_type in (OrderType.LIMIT_MAKER, OrderType.MARKET)
+                   for o in adapter.placed)
 
     asyncio.run(body())
 

@@ -31,6 +31,7 @@ from src.nadobro.engine.executors.order_executor import OrderExecutorConfig
 from src.nadobro.engine.executors.rgrid_maker_executor import (
     LEG_ENTRY,
     LEG_EXIT,
+    LEG_TRAIL_STOP,
     RGridMakerExecutor,
     build_maker_quote,
 )
@@ -87,14 +88,15 @@ def test_the_executor_refuses_anything_that_is_not_post_only(strategy):
         RGridMakerExecutor(cfg, user_id=1, controller_id="RG", adapter=adapter)
 
 
-def test_every_order_rgrid_places_is_post_only():
+def test_only_the_trailing_stop_may_cross():
+    """Everything R-Grid rests is post-only. The armed trailing stop is the single
+    exemption — it has to act where a post-only order cannot sit."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
         orch, c = _controller(adapter, extra={
             "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
         })
         await orch.spawn_controller(c)
-        # Walk price through both sides of the band and through a position.
         for px in ("100", "104", "108", "103", "99"):
             adapter.set_mid(Decimal(px))
             await orch.tick_controller(c.id)
@@ -103,12 +105,42 @@ def test_every_order_rgrid_places_is_post_only():
                     adapter.fill_order(o.id)
             await orch.tick_controller(c.id)
         assert adapter.placed, "expected R-Grid to have quoted"
-        assert all(o.order_type is OrderType.LIMIT_MAKER for o in adapter.placed), (
-            "R-Grid placed a non-post-only order: "
-            f"{[o.order_type for o in adapter.placed if o.order_type is not OrderType.LIMIT_MAKER]}"
+        crossing = [o for o in adapter.placed if o.order_type is not OrderType.LIMIT_MAKER]
+        assert all(o.order_type is OrderType.MARKET for o in crossing), (
+            f"a non-post-only, non-market order was placed: {crossing}"
         )
+        # Every crossing order is a reduce-only stop, never an entry.
+        stops = [e for e in c.my_executors(active_only=False)
+                 if getattr(e, "leg", None) == LEG_TRAIL_STOP]
+        assert len(stops) == len(crossing), "a crossing order that was not the stop"
+        assert all(e.config.position_action is PositionAction.CLOSE for e in stops)
 
     asyncio.run(body())
+
+
+def test_the_executor_allows_market_only_for_the_trailing_stop():
+    adapter = MockNadoAdapter(mid=Decimal(100))
+    from src.nadobro.engine.executors.rgrid_maker_executor import build_trail_stop
+
+    # Allowed: the stop.
+    ok = RGridMakerExecutor(
+        build_trail_stop(PAIR, TradeType.SELL, Decimal(1)),
+        user_id=1, controller_id="RG", adapter=adapter, leg=LEG_TRAIL_STOP,
+    )
+    assert ok.config.execution_strategy is ExecutionStrategy.MARKET and ok.is_exit
+    # Refused: a MARKET order dressed as an entry.
+    market_entry = OrderExecutorConfig(PAIR, TradeType.BUY, Decimal(1), ExecutionStrategy.MARKET)
+    with pytest.raises(ValueError, match="maker-only"):
+        RGridMakerExecutor(market_entry, user_id=1, controller_id="RG",
+                           adapter=adapter, leg=LEG_ENTRY)
+    # Refused: a stop that is not reduce-only.
+    not_reduce_only = OrderExecutorConfig(
+        PAIR, TradeType.SELL, Decimal(1), ExecutionStrategy.MARKET,
+        position_action=PositionAction.OPEN,
+    )
+    with pytest.raises(ValueError, match="reduce-only"):
+        RGridMakerExecutor(not_reduce_only, user_id=1, controller_id="RG",
+                           adapter=adapter, leg=LEG_TRAIL_STOP)
 
 
 def test_the_reducing_leg_is_reduce_only_and_the_adding_leg_is_not():
@@ -329,24 +361,50 @@ def test_the_armed_soft_reset_moves_the_exit_leg_up_with_the_trend():
         await orch.spawn_controller(c)
         c.inventory.apply_fill(1, PAIR, c.id, TradeType.BUY, Decimal(1), Decimal(100), Decimal(0))
         _seed_leg(c, "buy", 100)
-        # +8% and well past the arm threshold: the trail arms.
+        # +8% and well past the arm threshold: the trail arms at the peak.
         adapter.set_mid(Decimal("108"))
         await orch.tick_controller(c.id)
         assert c._trail_armed is True
         assert c._trail_peak == Decimal("108")
-        # At the peak the trailed price (108 x 0.999) is BELOW the market, so it is
-        # not postable as an ask — a trailing stop is not expressible as a maker
-        # order. The anchor-based leg is kept instead of cancelling the exit.
-        assert c._is_postable(TradeType.SELL, Decimal("108") * (1 - SPREAD), Decimal("108")) is False
+        # AT the peak the trail is not yet breached, so nothing crosses.
+        assert c._trail_breached(Decimal("108"), Decimal(1)) is False
+        assert [o for o in adapter.placed if o.order_type is OrderType.MARKET] == []
 
-        # Once price falls back past the trailed level it IS postable, and then the
-        # trail is what the leg rests at — well above the stale anchor leg (99.9).
+        # Price comes back THROUGH the trailed level (108 x 0.999 = 107.892) — the
+        # one place a post-only ask cannot sit. The stop crosses.
         adapter.set_mid(Decimal("107"))
         await orch.tick_controller(c.id)
-        sells = _resting(adapter, TradeType.SELL)
-        assert sells, "the exit leg should be resting once the trail is postable"
-        assert sells[-1].price == Decimal("108") * (1 - SPREAD)
-        assert sells[-1].price > Decimal(100), "still following the peak, not the anchor"
+        stops = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        assert len(stops) == 1, "the trailing stop never crossed"
+        assert stops[0].side is TradeType.SELL
+        assert stops[0].amount_base == Decimal(1), "the stop closes the whole position"
+
+    asyncio.run(body())
+
+
+def test_the_trail_only_crosses_once_and_cancels_the_resting_legs_first():
+    """Leaving the maker exit up alongside the stop would sell the same position
+    twice — the second order re-opening the other way once the first flattened us."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        orch, c = _controller(adapter, extra={
+            "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
+        })
+        await orch.spawn_controller(c)
+        c.inventory.apply_fill(1, PAIR, c.id, TradeType.BUY, Decimal(1), Decimal(100), Decimal(0))
+        _seed_leg(c, "buy", 100)
+        adapter.set_mid(Decimal("108"))
+        await orch.tick_controller(c.id)          # arms
+        adapter.set_mid(Decimal("107"))
+        await orch.tick_controller(c.id)          # crosses
+        assert c._resting == {}, "a resting leg survived alongside the stop"
+        stops = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        assert len(stops) == 1
+        # Further ticks while it settles must not stack a second stop.
+        for px in ("106", "105"):
+            adapter.set_mid(Decimal(px))
+            await orch.tick_controller(c.id)
+        assert len([o for o in adapter.placed if o.order_type is OrderType.MARKET]) == 1
 
     asyncio.run(body())
 

@@ -21,8 +21,13 @@ rule for every market-making strategy here is maker-first limit orders, and this
 geometry is maker by construction. A bid parked ABOVE the anchor becomes fillable
 exactly once price has risen past it, because only then is it a resting bid BELOW
 market that a seller can hit; symmetrically for the ask. So the fill IS the
-momentum signal without ever crossing the spread. At most one leg is postable at a
-time (the two conditions are mutually exclusive); inside the band R-Grid waits.
+momentum signal without paying the spread. At most one leg is postable at a time
+(the two conditions are mutually exclusive); inside the band R-Grid waits.
+
+The ONE order that crosses is the armed trailing stop. It has to act once price has
+come back THROUGH the trailed level, which is precisely where a post-only order
+cannot sit — so it is exempted, deliberately and narrowly: MARKET, reduce-only, and
+enforced as such in the executor constructor.
 
 Safety, in layers:
 
@@ -33,12 +38,11 @@ Safety, in layers:
 * **Soft reset** — once price has moved favourably by ``reset_threshold_pct`` AND
   the position is in profit, the opposite (exit) leg starts FOLLOWING the trend:
   the exit leg is RE-QUOTED to follow the trend instead of resting at the anchor.
-  Bounded by what a maker CAN express: a trailing stop wants to sell below the
-  peak, while a resting post-only ask must sit above the market, so the trailed
-  price is used only when it is both better for us and still postable. Otherwise
-  the anchor-based leg stands (it becomes postable as soon as price falls past it).
-  A true trailing stop would have to cross, so it is out of scope for a maker-only
-  strategy — the session SL/TP rail remains the hard exit.
+  Two exits, cheapest first: while the trailed price is still postable the exit
+  leg rests there and books the pullback without paying the spread. Once price
+  comes back THROUGH the trailed level — where a post-only ask cannot sit — the
+  stop CROSSES to close the whole position. That crossing order is the single
+  exemption from maker-only in this strategy, and it is reduce-only.
 * **Reversal recalibration** — the reducing leg always rests the WHOLE position,
   so a turn books all of it in one fill rather than a step per tick while the move
   runs. Once flat the window clears and the next move picks the side.
@@ -65,8 +69,10 @@ from src.nadobro.engine.controllers.market_making import MarketMakingController
 from src.nadobro.engine.executors.rgrid_maker_executor import (
     LEG_ENTRY,
     LEG_EXIT,
+    LEG_TRAIL_STOP,
     RGridMakerExecutor,
     build_maker_quote,
+    build_trail_stop,
 )
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.types import PositionAction, TradeType, _dec
@@ -112,6 +118,8 @@ class RGridController(MarketMakingController):
         # "one step on the adding side, the whole position on the reducing side").
         self._resting: Dict[TradeType, str] = {}
         self._resting_price: Dict[TradeType, Decimal] = {}
+        # The armed trailing stop is the one order that crosses; never stack two.
+        self._stop_id: Optional[str] = None
         # Exposure-price window as a fraction of each leg's recent fill VOLUME.
         # 0 ⇒ VWAP over the whole retained window.
         self.vwap_volume_fraction = _dec(self.cfg("vwap_volume_fraction", "0") or "0")
@@ -400,6 +408,60 @@ class RGridController(MarketMakingController):
         self._resting[side] = ex.id
         self._resting_price[side] = price
 
+    def _trail_breached(self, mid: Decimal, net: Decimal) -> bool:
+        """Has price come back through the armed trailing level?
+
+        Long: mid at/below ``peak x (1 - band)``. Short: mid at/above
+        ``trough x (1 + band)``. This is exactly the condition a resting post-only
+        order cannot express, which is why the stop crosses.
+        """
+        if not self._trail_armed or net == 0 or self._trail_peak is None or mid <= 0:
+            return False
+        trigger = self._trail_price(net)
+        return mid <= trigger if net > 0 else mid >= trigger
+
+    def _stop_in_flight(self) -> bool:
+        if self._stop_id is None:
+            return False
+        ex = self.orchestrator.get(self._stop_id)
+        if ex is None or ex.is_terminated:
+            self._stop_id = None
+            return False
+        return True
+
+    async def _fire_trail_stop(self, net: Decimal, mid: Decimal) -> bool:
+        """Cross the spread to close the WHOLE position — the single exemption from
+        maker-only, and the only order R-Grid pays the spread on.
+
+        Both resting legs are cancelled first: leaving the maker exit up alongside
+        this would let the same position be sold twice (the stop is reduce-only so
+        the venue could not over-close, but the second order would re-open the other
+        way once the first flattened us).
+        """
+        await self._cancel_leg(TradeType.BUY)
+        await self._cancel_leg(TradeType.SELL)
+        side = TradeType.SELL if net > 0 else TradeType.BUY
+        cfg = build_trail_stop(
+            self.trading_pair, side, abs(net),
+            leverage=int(self.cfg("leverage", 1) or 1),
+        )
+        ex = RGridMakerExecutor(
+            cfg, user_id=self.user_id, controller_id=self.id,
+            adapter=self.adapter, inventory=self.inventory, leg=LEG_TRAIL_STOP,
+        )
+        if not await self.spawn_executor(
+            ex, ExecutorRequest(order_amount_quote=abs(net) * mid, reduce_only=True)
+        ):
+            return False
+        self._stop_id = ex.id
+        logger.info(
+            "rgrid trailing stop: price came back to %s through the trail at %s "
+            "(peak %s) — crossing to close the %s of %s (user=%s pair=%s)",
+            mid, self._trail_price(net), self._trail_peak,
+            "long" if net > 0 else "short", abs(net), self.user_id, self.trading_pair,
+        )
+        return True
+
     def _is_postable(self, side: TradeType, price: Decimal, mid: Decimal) -> bool:
         """Can this price rest without crossing? A bid must sit below the market
         and an ask above it.
@@ -469,6 +531,9 @@ class RGridController(MarketMakingController):
         if net == 0 and self._has_fills():
             self._reset_exposure_window(mid)
 
+        if self._stop_in_flight():
+            return          # the crossing stop is working; do not re-quote over it
+
         anchor = self.exposure_anchor(mid)
         if anchor is None or anchor <= 0:
             await self._cancel_leg(TradeType.BUY)
@@ -483,19 +548,20 @@ class RGridController(MarketMakingController):
         buy_price = anchor * (Decimal(1) + band)
         sell_price = anchor * (Decimal(1) - band)
 
-        # Soft reset. Once armed the EXIT leg is re-quoted to follow the trend
-        # rather than sitting at the anchor.
+        # Soft reset. Once armed, the exit follows the trend.
         #
-        # LIMITATION, deliberate and guarded: a trailing exit wants to sell BELOW
-        # the peak (a stop), and a resting post-only ask must be ABOVE the market.
-        # At the peak those are contradictory, so the trailed price is simply not
-        # postable and applying it would cancel the leg and leave the position with
-        # NO resting exit at all — strictly worse than the anchor-based leg, which
-        # is postable as soon as price falls past it. So the trail is applied only
-        # when it is BOTH better for us and still postable; otherwise the
-        # anchor-based leg stands. (A true trailing stop is not expressible as a
-        # maker order; see the note in the module docstring.)
+        # A trailing stop wants to act BELOW the peak (for a long), which is exactly
+        # where a resting post-only ask cannot sit. So it CROSSES — the single
+        # exemption from maker-only, taken deliberately: the alternative was leaving
+        # a position with no exit in the one situation the mechanism exists for.
+        # Everything else R-Grid does still rests post-only.
         self._track_trail(mid, net)
+        if self._trail_breached(mid, net) and not self._stop_in_flight():
+            if await self._fire_trail_stop(net, mid):
+                return
+        # Not breached (or the stop was refused): the resting exit leg still follows
+        # the trend as far as a maker can, so a pullback that stops short of the
+        # trigger is booked without paying the spread.
         if self._trail_armed and net != 0:
             trailed = self._trail_price(net)
             if net > 0 and trailed > sell_price and self._is_postable(TradeType.SELL, trailed, mid):

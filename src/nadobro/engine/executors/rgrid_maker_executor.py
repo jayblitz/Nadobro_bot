@@ -34,9 +34,10 @@ from src.nadobro.engine.executors.order_executor import OrderExecutor, OrderExec
 from src.nadobro.engine.inventory import InventoryRepository
 from src.nadobro.engine.types import ExecutionStrategy, PositionAction, TradeType, _dec
 
-# Which leg a resting quote is. Plain strings so it survives telemetry/persistence.
-LEG_ENTRY = "entry"     # the side that ADDS into the move
-LEG_EXIT = "exit"       # the reduce-only side that books it (trails when armed)
+# Which leg an order is. Plain strings so it survives telemetry/persistence.
+LEG_ENTRY = "entry"            # the side that ADDS into the move — post-only
+LEG_EXIT = "exit"              # the resting reduce-only side that books it — post-only
+LEG_TRAIL_STOP = "trail_stop"  # the armed trailing stop — the ONE order that crosses
 
 
 class RGridMakerExecutor(OrderExecutor):
@@ -53,13 +54,30 @@ class RGridMakerExecutor(OrderExecutor):
         executor_id: Optional[str] = None,
         leg: str = LEG_ENTRY,
     ) -> None:
-        if config.execution_strategy is not ExecutionStrategy.LIMIT_MAKER:
-            raise ValueError(
-                "RGridMakerExecutor is maker-only: every market-making strategy "
-                "rests post-only limit orders, so execution_strategy must be "
-                f"LIMIT_MAKER (got {config.execution_strategy.value})"
-            )
         self.leg = str(leg or LEG_ENTRY)
+        # Maker-only, with exactly ONE documented exemption: the armed trailing
+        # stop. A trailing stop is not expressible as a resting maker order — it
+        # sells BELOW the peak while a post-only ask must sit ABOVE the market — so
+        # it is allowed to cross. Everything else must be post-only, and an edit
+        # that tries to sneak a MARKET entry through raises here.
+        if self.leg == LEG_TRAIL_STOP:
+            if config.execution_strategy is not ExecutionStrategy.MARKET:
+                raise ValueError(
+                    "the trailing stop is the crossing order: execution_strategy "
+                    f"must be MARKET (got {config.execution_strategy.value})"
+                )
+            if config.position_action is not PositionAction.CLOSE:
+                raise ValueError(
+                    "the trailing stop must be reduce-only so it can never open or "
+                    "flip a position"
+                )
+        elif config.execution_strategy is not ExecutionStrategy.LIMIT_MAKER:
+            raise ValueError(
+                "RGridMakerExecutor is maker-only apart from the trailing stop: "
+                "every market-making strategy rests post-only limit orders, so "
+                f"execution_strategy must be LIMIT_MAKER (got "
+                f"{config.execution_strategy.value})"
+            )
         super().__init__(
             config,
             user_id=user_id,
@@ -82,7 +100,7 @@ class RGridMakerExecutor(OrderExecutor):
         """
         return (
             self.config.position_action is PositionAction.CLOSE
-            or self.leg == LEG_EXIT
+            or self.leg in (LEG_EXIT, LEG_TRAIL_STOP)
         )
 
 
@@ -101,4 +119,25 @@ def build_maker_quote(
         price=_dec(price),
         leverage=int(leverage or 1),
         position_action=PositionAction.CLOSE if reduce_only else PositionAction.OPEN,
+    )
+
+
+def build_trail_stop(
+    trading_pair: str,
+    side: TradeType,
+    amount_base: object,
+    *,
+    leverage: int = 1,
+) -> OrderExecutorConfig:
+    """Config for the armed trailing stop: MARKET, reduce-only, crossing.
+
+    The single exemption from maker-only. A trailing stop has to act once price has
+    already moved against the position, which is precisely where a resting post-only
+    order cannot sit — so this one crosses. Reduce-only, so it can only shrink the
+    book, never open or flip it.
+    """
+    return OrderExecutorConfig(
+        trading_pair, side, _dec(amount_base), ExecutionStrategy.MARKET,
+        leverage=int(leverage or 1),
+        position_action=PositionAction.CLOSE,
     )
