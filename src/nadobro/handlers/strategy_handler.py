@@ -655,7 +655,7 @@ async def _handle_strategy(query, data, context, telegram_id):
         if strategy_id not in supported:
             return
         network, settings = get_user_settings(telegram_id)
-        conf = _conf_for_card(settings, strategy_id, context)
+        conf = _conf_for_card(settings, strategy_id, context, network)
         context.user_data.pop(f"strategy_config_section:{strategy_id}", None)
         await _edit_loc(query, 
             _strategy_config_menu_text(strategy_id, conf, network),
@@ -671,7 +671,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             return
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         network, settings = get_user_settings(telegram_id)
-        conf = _conf_for_card(settings, strategy_id, context)
+        conf = _conf_for_card(settings, strategy_id, context, network)
         await _edit_loc(
             query,
             _strategy_config_section_text(strategy_id, conf, network, section),
@@ -710,7 +710,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 _replace_mm_preset(cfg, strategy_id, "turbo", turbo_cfg)
 
             network, settings = update_user_settings(telegram_id, _mutate_turbo)
-            conf = _conf_for_card(settings, strategy_id, context)
+            conf = _conf_for_card(settings, strategy_id, context, network)
             section = "setup"
             context.user_data[f"strategy_config_section:{strategy_id}"] = section
             margin_t = float(conf.get("notional_usd", 100.0) or 0.0)
@@ -745,11 +745,13 @@ async def _handle_strategy(query, data, context, telegram_id):
                 _replace_mm_preset(cfg, strategy_id, "standard")
 
             network, settings = update_user_settings(telegram_id, _mutate_std)
-            conf = _conf_for_card(settings, strategy_id, context)
+            conf = _conf_for_card(settings, strategy_id, context, network)
             section = "setup"
             context.user_data[f"strategy_config_section:{strategy_id}"] = section
             # Confirmation note so Standard is no longer a silent no-op: it clears
-            # the Tiny override and returns to the default leverage (margin × 3x).
+            # the Tiny override and returns to the leverage the run will resolve
+            # (the pair max for grid/rgrid/dgrid, else the user's default) — read
+            # through _mm_effective_leverage so the number shown is the engine's.
             margin_std = float(conf.get("notional_usd", 100.0) or 0.0)
             deployed_std = margin_std * _mm_effective_leverage(conf)
             std_note = (
@@ -822,7 +824,7 @@ async def _handle_strategy(query, data, context, telegram_id):
             )
 
         network, settings = update_user_settings(telegram_id, _mutate_tiny)
-        conf = _conf_for_card(settings, strategy_id, context)
+        conf = _conf_for_card(settings, strategy_id, context, network)
         section = "setup"
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         notional_after = collateral * float(target_lev)
@@ -988,7 +990,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 sync_cycle_notional_with_margin(strategies, strategy_id)
 
         network, settings = update_user_settings(telegram_id, _mutate)
-        conf = _conf_for_card(settings, strategy_id, context)
+        conf = _conf_for_card(settings, strategy_id, context, network)
         section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         await _edit_loc(query, 
@@ -1036,7 +1038,7 @@ async def _handle_strategy(query, data, context, telegram_id):
                 cfg[field] = raw_value
 
         network, settings = update_user_settings(telegram_id, _mutate)
-        conf = _conf_for_card(settings, strategy_id, context)
+        conf = _conf_for_card(settings, strategy_id, context, network)
         section = context.user_data.get(f"strategy_config_section:{strategy_id}") or _strategy_section_for_field(strategy_id, field)
         context.user_data[f"strategy_config_section:{strategy_id}"] = section
         await _edit_loc(query, 
@@ -1593,11 +1595,57 @@ def _strategy_config_menu_kb(strategy: str):
 
 
 def _mm_effective_leverage(conf: dict) -> float:
-    """Display-side mirror of engine_runtime._effective_leverage: an explicit
-    mm_leverage_override wins, else the MM default (3x). Used so the card shows
-    the SAME leverage the engine will deploy."""
-    override = float(conf.get("mm_leverage_override", 0) or 0)
-    return override if override >= 1 else 3.0
+    """The leverage the ENGINE will deploy at — resolved by the engine's own
+    helper rather than mirrored, so the card cannot drift from it.
+
+    This used to be a hand-written "override wins, else 3x" copy, and it was
+    wrong in both directions (CARD-LEV-DIVERGE, self-review 2026-08-07). The
+    engine resolves ``mm_leverage_override`` -> session ``leverage`` -> 1x, and
+    for grid/rgrid/dgrid the start path sets that session ``leverage`` to the
+    PAIR MAX. On BTC (50x) the card therefore priced every size at 3x: it showed
+    a $75 step where the engine deployed $306.98, and — because the step cap is
+    computed from the same number — it reported "not capped" on a run the engine
+    was capping. The whole stop-headroom warning was blind to the real size.
+
+    ``_conf_for_card`` injects ``leverage`` with the value the start path will
+    resolve, so a card rendered BEFORE the run agrees with the run.
+    """
+    from src.nadobro.strategy.engine_runtime import _effective_leverage
+
+    return _effective_leverage(conf, 1.0)
+
+
+def _start_leverage_for_card(
+    settings: dict, strategy_id: str, product: str | None, network: str | None,
+) -> float:
+    """The session leverage the START path will hand the engine.
+
+    Mirrors the resolution in the ``preview`` branch (the value that becomes
+    ``state["leverage"]``, which is what ``_effective_leverage`` reads): vol is
+    always 1x, dn is clamped to 5x, grid/rgrid/dgrid deploy at the PAIR MAX, and
+    everything else takes the user's ``default_leverage``. Kept next to
+    ``_mm_effective_leverage`` so the two stay in step.
+
+    Cache-first: ``get_product_max_leverage`` reads the product catalog, the same
+    synchronous call the start branch already makes on a tap, and any failure
+    degrades to ``default_leverage`` rather than blocking the card.
+    """
+    if strategy_id == "vol":
+        return 1.0
+    try:
+        default_lev = float(settings.get("default_leverage", 3) or 3)
+    except (TypeError, ValueError):
+        default_lev = 3.0
+    if strategy_id == "dn":
+        return max(1.0, min(default_lev, 5.0))
+    if strategy_id in ("grid", "rgrid", "dgrid") and product:
+        try:
+            from src.nadobro.config import get_product_max_leverage as _gpml
+
+            return max(1.0, float(_gpml(str(product), network=network)))
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(card falls back to the user default)
+            return max(1.0, default_lev)
+    return max(1.0, default_lev)
 
 
 def rgrid_step_plan(conf: dict, sl_pct_val: float):
@@ -1782,7 +1830,9 @@ def _ladder_line(conf: dict) -> str:
     )
 
 
-def _conf_for_card(settings: dict, strategy_id: str, context) -> dict:
+def _conf_for_card(
+    settings: dict, strategy_id: str, context, network: str | None = None,
+) -> dict:
     """The strategy's stored config PLUS the product the user has selected.
 
     ``settings["strategies"][sid]`` has no "product" key — the chosen asset lives
@@ -1799,6 +1849,16 @@ def _conf_for_card(settings: dict, strategy_id: str, context) -> dict:
         sel = None
     if sel:
         conf.setdefault("product", str(sel).upper())
+    # ...and the leverage the run will actually deploy at. The stored per-strategy
+    # config has no ``leverage`` key — the session value is resolved at START from
+    # the pair max — so every size the card renders (step, deployed notional, the
+    # stop-budget cap and its four warning tiers) was computed at a hardcoded 3x
+    # while the engine ran at up to 50x. setdefault, so a stored value or an
+    # explicit mm_leverage_override still wins, exactly as in the engine.
+    conf.setdefault(
+        "leverage",
+        _start_leverage_for_card(settings, strategy_id, conf.get("product"), network),
+    )
     return conf
 
 

@@ -44,10 +44,13 @@ logger = logging.getLogger(__name__)
 # Strategy id (bot_runtime's keys) -> engine controller class.
 CONTROLLER_REGISTRY: Dict[str, type] = {
     "grid": GridController,
-    # rgrid = Reverse Grid: its OWN controller and its own taker executor
-    # (engine/controllers/rgrid.py + executors/rgrid_taker_executor.py). Both legs
-    # quote off the average of the buy and sell exposure prices and cross the
-    # spread on a break. It does NOT switch between grid and reverse-grid phases;
+    # rgrid = Reverse Grid: its OWN controller and its own maker executor
+    # (engine/controllers/rgrid.py + executors/rgrid_maker_executor.py). Both legs
+    # REST post-only off the average of the buy and sell exposure prices — the bid
+    # above it, the ask below — so a break fills them without paying the spread.
+    # The one order that crosses is the armed trailing stop (MARKET, reduce-only),
+    # which has to act where a post-only order cannot rest. It does NOT switch
+    # between grid and reverse-grid phases;
     # that switcher is D-Grid, and running rgrid on it (the pre-2026-08-06 wiring)
     # is what produced "Reverse GRID switched RGRID → GRID … now quoting the LONG
     # ladder" on users' R-Grid sessions.
@@ -1307,9 +1310,12 @@ def map_strategy_config(
             # The trigger offset from the exposure average, per leg.
             "spread_bid_pct": _band,
             "spread_ask_pct": _band,
-            # ONE taker of this size per break: deployed/levels, shrunk by a POV
-            # chunk and by the stop budget (see resolve_step_quote above). Never
-            # grown by either.
+            # ONE resting quote of this size per break: deployed/levels, shrunk by
+            # a POV chunk and by the stop budget (see resolve_step_quote above).
+            # Never grown by either. The step is priced against the TAKER round
+            # trip even though both legs are makers — a deliberately conservative
+            # bound, and the one order that does cross (the trailing stop) is
+            # therefore already inside the budget.
             "order_amount_quote": _step_plan.step,
             # The risk-bound the overlay may not exceed (see _maybe_apply_overlay).
             "step_capped_quote": _step_plan.step,
@@ -1433,10 +1439,12 @@ def map_strategy_config(
     # user's sl_pct. That stop is referenced to the run/rebuild mid and ignores
     # how much of the grid has actually filled, so it fires on a brief wick to
     # mid*(1-sl) even when little is at risk — a premature stop-out on top of the
-    # session margin-% rail. SL is now governed consistently by (a) the executor
-    # avg-entry barrier (triple_barrier_config.stop_loss, fill-aware) and (b) the
-    # fee-aware session rail. limit_price stays available as an explicit
-    # catastrophic stop but is no longer auto-set from sl.
+    # session margin-% rail. SL is now governed by the fee-aware %-of-margin
+    # session rail ALONE — the executor avg-entry barrier this comment used to
+    # name second is no longer constructed for the ladder either (DGRID-DUAL-UNIT,
+    # 2026-08-06: one user number must be a price barrier OR a margin rail, never
+    # both). limit_price stays available as an explicit catastrophic stop but is
+    # no longer auto-set from sl.
     # POST-ONLY-CROSS fix: the boundary level nearest mid must be a strict maker,
     # or a post-only LIMIT_MAKER placed AT mid crosses the book and the venue
     # rejects it (error_code 2008 — seen on every rgrid SELL and, once grids
@@ -1629,9 +1637,13 @@ def map_risk_limits(
     # budget, and from levels=3 up the deep ask rungs were rejected every tick
     # with `risk:max_open_executors` — a permanent 2:1 long-skewed book that
     # accumulates inventory in a downtrend with half the depth to unwind it.
-    # Mid ladders unconditionally; grid/rgrid only on the fill-anchored path.
+    # Mid ladders unconditionally; GRID only on its fill-anchored path. rgrid is
+    # excluded on purpose: it rests exactly one quote per side (ladder_levels=1)
+    # and its own toggle was removed, so an fill_anchored=1 left behind in a
+    # user's bot_state from that removed button would otherwise still double
+    # R-Grid's executor budget for a book that never uses it.
     _laddered = strategy == "mid" or (
-        strategy in ("grid", "rgrid") and bool(_f(settings, "fill_anchored", 0.0))
+        strategy == "grid" and bool(_f(settings, "fill_anchored", 0.0))
     )
     _executor_budget = (2 * levels + 2) if _laddered else (levels + 2)
     return RiskLimits(

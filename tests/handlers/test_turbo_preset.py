@@ -191,19 +191,74 @@ def test_a_stop_too_tight_for_the_venue_minimum_is_flagged_not_silently_unplacea
 
 def test_the_engine_and_the_card_agree_on_the_step():
     """The card must never quote a size the strategy does not place — both go
-    through quant.rgrid_sizing."""
+    through quant.rgrid_sizing.
+
+    CARD-LEV-DIVERGE (self-review 2026-08-07): this test used to pass ONLY because
+    every case pinned ``mm_leverage_override``, the one input where the card's old
+    hand-written 3x default happened to agree with the engine. Every leverage path
+    is exercised now — bare (engine falls back to 1x), the session ``leverage`` the
+    start path writes from the PAIR MAX, and the explicit override. With the old
+    card helper the 50x row rendered a $75 uncapped step against an engine that
+    deployed $306.98 capped, so the stop-headroom warning was blind.
+    """
     from decimal import Decimal
 
     from src.nadobro.handlers.strategy_handler import rgrid_stop_headroom
     from src.nadobro.strategy.engine_runtime import map_strategy_config
 
-    conf = {"notional_usd": 100.0, "levels": 4, "mm_leverage_override": 49,
-            "rgrid_stop_loss_pct": 0.8}
-    cfg = map_strategy_config("rgrid", conf, Decimal(64500), product="BTC-PERP")
-    room = rgrid_stop_headroom(conf, 0.8)
-    assert float(cfg["order_amount_quote"]) == room["step_usd"]
-    assert bool(cfg["step_capped_by_stop"]) is room["capped"]
-    assert float(cfg["step_uncapped_quote"]) == room["uncapped_step_usd"]
+    base = {"notional_usd": 100.0, "levels": 4, "rgrid_stop_loss_pct": 0.8}
+    for label, extra in (
+        ("bare (no leverage anywhere)", {}),
+        ("session leverage 5x", {"leverage": 5}),
+        ("session leverage 50x — the pair max on BTC", {"leverage": 50}),
+        ("explicit override 49x", {"mm_leverage_override": 49}),
+        ("override wins over session", {"leverage": 3, "mm_leverage_override": 10}),
+    ):
+        conf = {**base, **extra}
+        cfg = map_strategy_config(
+            "rgrid", conf, Decimal(64500), product="BTC-PERP",
+            # What run_engine_cycle passes: settings["leverage"] or 1.
+            leverage=int(conf.get("leverage", 1) or 1),
+        )
+        room = rgrid_stop_headroom(conf, 0.8)
+        assert float(cfg["order_amount_quote"]) == room["step_usd"], label
+        assert bool(cfg["step_capped_by_stop"]) is room["capped"], label
+        assert float(cfg["step_uncapped_quote"]) == room["uncapped_step_usd"], label
+
+
+def test_the_card_reads_the_leverage_the_run_will_deploy_at():
+    """The stored per-strategy config has no ``leverage`` — the session value is
+    resolved at START from the pair max — so _conf_for_card must inject it or every
+    size on the card is computed at the wrong leverage (CARD-LEV-DIVERGE)."""
+    from types import SimpleNamespace
+
+    from src.nadobro.handlers.strategy_handler import (
+        _conf_for_card, _mm_effective_leverage,
+    )
+    from src.nadobro.config import get_product_max_leverage
+
+    ctx = SimpleNamespace(user_data={"strategy_pair:rgrid": "BTC"})
+    conf = _conf_for_card(
+        {"strategies": {"rgrid": {"notional_usd": 100.0, "levels": 4}}},
+        "rgrid", ctx, "mainnet",
+    )
+    pair_max = float(get_product_max_leverage("BTC", network="mainnet"))
+    assert conf["leverage"] == pair_max, "the card must use the pair max, not 3x"
+    assert _mm_effective_leverage(conf) == pair_max
+
+    # An explicit override still wins, in the card exactly as in the engine.
+    conf_ov = _conf_for_card(
+        {"strategies": {"rgrid": {"notional_usd": 100.0, "mm_leverage_override": 7}}},
+        "rgrid", ctx, "mainnet",
+    )
+    assert _mm_effective_leverage(conf_ov) == 7.0
+
+    # Vol is always 1x; dn is clamped to 5x. Neither may inherit a perp pair max.
+    assert _conf_for_card({"strategies": {"vol": {}}}, "vol", ctx, "mainnet")[
+        "leverage"] == 1.0
+    assert _conf_for_card(
+        {"strategies": {"dn": {}}, "default_leverage": 20}, "dn", ctx, "mainnet",
+    )["leverage"] == 5.0
 
 
 def test_rgrid_risk_card_explains_the_cap_and_its_failure_modes():

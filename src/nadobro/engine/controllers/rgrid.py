@@ -402,6 +402,7 @@ class RGridController(MarketMakingController):
         if not await self.spawn_executor(
             ex, ExecutorRequest(
                 order_amount_quote=amount_base * price, reduce_only=reduce_only,
+                position_action=cfg.position_action,
             )
         ):
             return
@@ -450,7 +451,10 @@ class RGridController(MarketMakingController):
             adapter=self.adapter, inventory=self.inventory, leg=LEG_TRAIL_STOP,
         )
         if not await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=abs(net) * mid, reduce_only=True)
+            ex, ExecutorRequest(
+                order_amount_quote=abs(net) * mid, reduce_only=True,
+                position_action=cfg.position_action,
+            )
         ):
             return False
         self._stop_id = ex.id
