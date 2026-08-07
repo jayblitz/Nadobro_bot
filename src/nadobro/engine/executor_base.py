@@ -37,6 +37,8 @@ class TradeRecorder(Protocol):
         fee_quote: Decimal,
         order_id: Optional[str] = ...,
         timestamp: Optional[float] = ...,
+        *,
+        is_taker: bool = ...,
     ) -> None:
         ...
 
@@ -149,6 +151,29 @@ class Executor(abc.ABC):
             f"{label or 'adapter op'} failed after {self.MAX_ATTEMPTS} attempts: {last_exc}"
         )
 
+    def _fill_was_taker(self) -> bool:
+        """Whether this executor's order crossed the spread.
+
+        ``DbTradeRecorder.record`` defaults ``is_taker`` to False and nothing
+        downstream ever corrected it for engine-bridged rows (nado_sync enriches
+        realized PnL and product identity, not this flag), so EVERY engine fill was
+        recorded as a maker fill. Harmless for a maker ladder; systematically wrong
+        for R-Grid and the volume bot, which cross by design — their fee analytics
+        and any ``is_taker`` filter read them as maker.
+
+        A MARKET order is unambiguously a taker. A resting LIMIT can also fill as
+        taker if it crossed on entry, which we cannot tell from here; reporting
+        those as maker is the same (conservative) answer as before, so this can only
+        make the flag more accurate, never less.
+        """
+        order_type = getattr(getattr(self, "config", None), "execution_strategy", None)
+        try:
+            from src.nadobro.engine.types import ExecutionStrategy
+
+            return order_type is ExecutionStrategy.MARKET
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(unknown shape ⇒ prior behaviour)
+            return False
+
     def _record_fill(self, fill: Fill) -> None:
         self._fees_paid_quote += fill.fee_quote
         self._volume_quote += fill.amount_quote
@@ -180,6 +205,7 @@ class Executor(abc.ABC):
                     fill.fee_quote,
                     fill.order_id,
                     fill.timestamp,
+                    is_taker=self._fill_was_taker(),
                 )
             except Exception:  # noqa: BLE001  # policy: degrade-ok(trade-recording is best-effort; the recorder logs its own failures — a fill must never be lost to a reporting-bridge error)
                 pass
