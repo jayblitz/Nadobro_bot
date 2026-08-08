@@ -16,18 +16,23 @@ leg's *exposure price* is a rolling VWAP over the most recent portion of that
 leg's filled volume (``vwap_volume_fraction``, driven by the user's discretion
 knob), which is a steadier reference than a single last fill.
 
-Both legs are POST-ONLY limit orders (:class:`RGridMakerExecutor`) — the standing
-rule for every market-making strategy here is maker-first limit orders, and this
-geometry is maker by construction. A bid parked ABOVE the anchor becomes fillable
+ENTRIES REST, EXITS CROSS (2026-08-08, product ruling).
+
+The ADDING leg is a POST-ONLY limit order (:class:`RGridMakerExecutor`), and the
+geometry is maker by construction: a bid parked ABOVE the anchor becomes fillable
 exactly once price has risen past it, because only then is it a resting bid BELOW
 market that a seller can hit; symmetrically for the ask. So the fill IS the
-momentum signal without paying the spread. At most one leg is postable at a time
-(the two conditions are mutually exclusive); inside the band R-Grid waits.
+momentum signal without paying the spread. While flat, both sides rest and
+whichever fills sets the direction.
 
-The ONE order that crosses is the armed trailing stop. It has to act once price has
-come back THROUGH the trailed level, which is precisely where a post-only order
-cannot sit — so it is exempted, deliberately and narrowly: MARKET, reduce-only, and
-enforced as such in the executor constructor.
+Every EXIT crosses — the exposure-band exit, the armed trailing stop, and the
+session rail's close. All three are MARKET and reduce-only. The exposure-band exit
+used to rest post-only, and that was the source of a whole class of defects: its
+level is anchor*(1-band) for a long, i.e. BELOW mid, which is the shape of a stop
+rather than a quote, so the order declined below the venue minimum (leaving a
+residual with no exit while the entry leg kept adding), was cancelled outright
+whenever the trail armed above it, and left a stub on a partial fill. An exit that
+may not fill is not an exit.
 
 Safety, in layers:
 
@@ -36,16 +41,12 @@ Safety, in layers:
   controller never second-guesses it, and never applies the same user number as a
   price barrier too (the units invariant).
 * **Soft reset** — once price has moved favourably by ``reset_threshold_pct`` AND
-  the position is in profit, the opposite (exit) leg starts FOLLOWING the trend:
-  the exit leg is RE-QUOTED to follow the trend instead of resting at the anchor.
-  Two exits, cheapest first: while the trailed price is still postable the exit
-  leg rests there and books the pullback without paying the spread. Once price
-  comes back THROUGH the trailed level — where a post-only ask cannot sit — the
-  stop CROSSES to close the whole position. That crossing order is the single
-  exemption from maker-only in this strategy, and it is reduce-only.
-* **Reversal recalibration** — the reducing leg always rests the WHOLE position,
-  so a turn books all of it in one fill rather than a step per tick while the move
-  runs. Once flat the window clears and the next move picks the side.
+  the position is in profit, the exit level starts FOLLOWING the trend: it trails
+  the best price by one spread instead of sitting at the anchor, so the run keeps
+  going and the profit is locked. It fires by CROSSING, like every exit here.
+* **Reversal recalibration** — an exit always closes the WHOLE position in one
+  order, so a turn books all of it at once rather than a step per tick while the
+  move runs. Once flat the window clears and the next move picks the side.
 * **Net-exposure cap** — inherited from MarketMakingController, and never
   disabled. The regime gate ships OFF (it pauses on TRENDS, which is when R-Grid
   must act); the cap, the soft reset and the session rails are the backstops.
@@ -430,7 +431,9 @@ class RGridController(MarketMakingController):
             return False
         return True
 
-    async def _fire_trail_stop(self, net: Decimal, mid: Decimal) -> bool:
+    async def _fire_trail_stop(
+        self, net: Decimal, mid: Decimal, *, reason: str = "trailing stop",
+    ) -> bool:
         """Cross the spread to close the WHOLE position — the single exemption from
         maker-only, and the only order R-Grid pays the spread on.
 
@@ -459,9 +462,9 @@ class RGridController(MarketMakingController):
             return False
         self._stop_id = ex.id
         logger.info(
-            "rgrid trailing stop: price came back to %s through the trail at %s "
+            "rgrid crossing exit (%s): mid %s reached the level %s "
             "(peak %s) — crossing to close the %s of %s (user=%s pair=%s)",
-            mid, self._trail_price(net), self._trail_peak,
+            reason, mid, self._trail_price(net), self._trail_peak,
             "long" if net > 0 else "short", abs(net), self.user_id, self.trading_pair,
         )
         return True
@@ -561,35 +564,55 @@ class RGridController(MarketMakingController):
         # Everything else R-Grid does still rests post-only.
         self._track_trail(mid, net)
         if self._trail_breached(mid, net) and not self._stop_in_flight():
-            if await self._fire_trail_stop(net, mid):
+            if await self._fire_trail_stop(net, mid, reason="trailing stop"):
                 return
-        # Not breached (or the stop was refused): the resting exit leg still follows
-        # the trend as far as a maker can, so a pullback that stops short of the
-        # trigger is booked without paying the spread.
-        if self._trail_armed and net != 0:
-            trailed = self._trail_price(net)
-            if net > 0 and trailed > sell_price and self._is_postable(TradeType.SELL, trailed, mid):
-                sell_price = trailed
-            elif net < 0 and trailed < buy_price and self._is_postable(TradeType.BUY, trailed, mid):
-                buy_price = trailed
 
-        # Sizing: the ADDING leg rests one step; the REDUCING leg rests the whole
-        # position, so a turn books all of it in one fill instead of a step per
-        # tick while the move runs.
+        # THE REDUCING SIDE IS A TRIGGER, NOT A RESTING ORDER.
+        #
+        # R-Grid's exit level is anchor*(1-band) for a long — BELOW mid, i.e. price
+        # has to come DOWN to it, which is precisely the shape of a stop. Resting it
+        # post-only made it an order that might never fill: it declined below the
+        # venue minimum (leaving a residual with no exit while the entry leg kept
+        # adding), it was cancelled outright whenever the trail armed above it, and
+        # a partial fill left a stub. So the reducing side now WATCHES mid and
+        # crosses the whole position when the level is reached, like the trail stop
+        # it sits alongside. Only the ADDING leg still rests post-only — that one
+        # has no deadline and earns the spread, which is the whole point of the
+        # geometry (a bid parked above the anchor only becomes fillable once price
+        # has risen past it, so the fill IS the momentum signal).
+        if net != 0 and not self._stop_in_flight():
+            exit_trigger = sell_price if net > 0 else buy_price
+            reached = mid <= exit_trigger if net > 0 else mid >= exit_trigger
+            if reached:
+                if await self._fire_trail_stop(net, mid, reason="exposure band"):
+                    return
+
+        # Sizing: only the ADDING leg rests, one step at a time. The reducing side
+        # is the trigger above, so there is no resting exit to size.
         step_base = (self.order_amount_quote / mid) if mid > 0 else Decimal(0)
-        buy_amount = abs(net) if net < 0 else step_base
-        sell_amount = abs(net) if net > 0 else step_base
-        buy_leg = LEG_EXIT if net < 0 else LEG_ENTRY
-        sell_leg = LEG_EXIT if net > 0 else LEG_ENTRY
-
-        await self._quote_leg(
-            TradeType.BUY, buy_price, buy_amount,
-            leg=buy_leg, allowed=allow_buy, mid=mid,
-        )
-        await self._quote_leg(
-            TradeType.SELL, sell_price, sell_amount,
-            leg=sell_leg, allowed=allow_sell, mid=mid,
-        )
+        if net > 0:
+            # Long: the sell side is the exit trigger; only the buy adds.
+            await self._quote_leg(
+                TradeType.BUY, buy_price, step_base,
+                leg=LEG_ENTRY, allowed=allow_buy, mid=mid,
+            )
+            await self._cancel_leg(TradeType.SELL)
+        elif net < 0:
+            await self._quote_leg(
+                TradeType.SELL, sell_price, step_base,
+                leg=LEG_ENTRY, allowed=allow_sell, mid=mid,
+            )
+            await self._cancel_leg(TradeType.BUY)
+        else:
+            # Flat: both sides are entries, and whichever fills sets the direction.
+            await self._quote_leg(
+                TradeType.BUY, buy_price, step_base,
+                leg=LEG_ENTRY, allowed=allow_buy, mid=mid,
+            )
+            await self._quote_leg(
+                TradeType.SELL, sell_price, step_base,
+                leg=LEG_ENTRY, allowed=allow_sell, mid=mid,
+            )
 
     def _track_trail(self, mid: Decimal, net: Decimal) -> None:
         """Update the favourable extreme and the armed flag. No orders here — the

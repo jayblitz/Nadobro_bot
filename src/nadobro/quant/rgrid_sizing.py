@@ -6,8 +6,8 @@ past a point the two collide. The bound below is priced at the TAKER round trip
 even though R-Grid rests makers: it is a risk bound, and the cheaper real cost
 must only ever leave MORE headroom than assumed, never less:
 
-    $100 margin, 49x, 4 levels  →  $1,225 per break
-    one taker round trip         →  $1,225 x 8.6bp = $1.05
+    $100 margin, 49x, 4 levels  →  $1,225 per break, $4,900 at full pyramid
+    the pyramid's taker round trip →  $4,900 x 8.6bp = $4.21
     0.8%-of-margin stop          →  $0.80
 
 The session then stops out on the FIRST entry+exit whichever way price went. The
@@ -59,7 +59,11 @@ class StepPlan:
     step: Decimal                 # what to trade per break
     uncapped: Decimal             # what sizing asked for before the stop budget
     stop_budget_usd: Decimal      # SL% x margin (0 ⇒ stop disarmed, no cap applied)
-    round_trip_cost: Decimal      # taker fees for one entry + exit at ``step``
+    # Taker fees for one entry + exit of the PYRAMID (``levels * step``), not of a
+    # single step. R-Grid adds a step per break and exits the whole position at
+    # once, so a per-step figure told the user they had ``levels`` times more
+    # headroom than they did — the card renders this as "about N round trips".
+    round_trip_cost: Decimal
     capped: bool                  # the stop budget shrank the step
     floored: bool                 # the budget wanted LESS than min_step_usd
 
@@ -84,17 +88,55 @@ def taker_round_trip_cost(step_quote: object) -> Decimal:
 
 
 def max_step_for_stop_budget(
-    stop_budget_usd: object, *, max_fee_share: Decimal = DEFAULT_MAX_FEE_SHARE
+    stop_budget_usd: object,
+    *,
+    max_fee_share: Decimal = DEFAULT_MAX_FEE_SHARE,
+    levels: int = 1,
+    band_frac: object = 0,
 ) -> Optional[Decimal]:
-    """Largest step whose round-trip fee stays within ``max_fee_share`` of the
-    stop budget. ``None`` when there is no budget to size against."""
+    """Largest step whose PYRAMID stays inside the stop budget. ``None`` when
+    there is no budget to size against.
+
+    Two bounds, both against ``levels * step`` — the exposure a full pyramid
+    reaches — not against one step. Sizing against one step was the original
+    error (RGRID-STEP-EXIT-FEE / RGRID-STEP-PRICE-BOUND, self-audit 2026-08-08):
+    R-Grid ADDS a step per break, and the exit closes the whole position at once,
+    so a bound priced on a single step under-states the real cost by ``levels``.
+
+    1. FEE bound — the pyramid's round trip may consume at most ``max_fee_share``
+       of the budget::
+
+           levels * step * RATE <= budget * max_fee_share
+
+    2. PRICE bound — a full band of adverse move against the pyramid, plus its
+       fees, must still fit inside the budget::
+
+           levels * step * (band + RATE) <= budget
+
+       Without this the cap bounded FEES only. R-Grid's own exit needs a ``band``
+       pullback to trigger, so if one band of adverse move already exceeds the
+       budget the session rail ALWAYS fires first and the strategy can never exit
+       on its own terms — again "the user never sees a losing trade, just a
+       strategy that keeps stopping", from the price side instead of the fee side.
+
+    ``band_frac`` of 0 disables bound 2 (callers that genuinely have no band).
+    """
     try:
         budget = Decimal(str(stop_budget_usd or 0))
     except Exception:  # noqa: BLE001
         return None
     if budget <= 0 or max_fee_share <= 0 or TAKER_ROUND_TRIP_RATE <= 0:
         return None
-    return (budget * max_fee_share) / TAKER_ROUND_TRIP_RATE
+    lv = Decimal(max(1, int(levels or 1)))
+    fee_bound = (budget * max_fee_share) / (lv * TAKER_ROUND_TRIP_RATE)
+    try:
+        band = max(Decimal(0), Decimal(str(band_frac or 0)))
+    except Exception:  # noqa: BLE001 - an unusable band simply does not bind
+        band = Decimal(0)
+    move_rate = band + TAKER_ROUND_TRIP_RATE
+    if band <= 0 or move_rate <= 0:
+        return fee_bound
+    return min(fee_bound, budget / (lv * move_rate))
 
 
 def resolve_step_quote(
@@ -105,6 +147,7 @@ def resolve_step_quote(
     stop_budget_usd: object = 0,
     min_step_usd: object = 0,
     max_fee_share: Decimal = DEFAULT_MAX_FEE_SHARE,
+    band_frac: object = 0,
 ) -> StepPlan:
     """Resolve R-Grid's per-break size.
 
@@ -127,7 +170,9 @@ def resolve_step_quote(
 
     floor = max(Decimal(0), Decimal(str(min_step_usd or 0)))
     capped = floored = False
-    budget_cap = max_step_for_stop_budget(stop_budget_usd, max_fee_share=max_fee_share)
+    budget_cap = max_step_for_stop_budget(
+        stop_budget_usd, max_fee_share=max_fee_share, levels=lv, band_frac=band_frac,
+    )
     if budget_cap is not None and budget_cap < step:
         if budget_cap < floor:
             # The stop is too tight for ANY placeable size. Stop at the floor and
@@ -147,7 +192,7 @@ def resolve_step_quote(
         step=step,
         uncapped=uncapped,
         stop_budget_usd=budget,
-        round_trip_cost=taker_round_trip_cost(step),
+        round_trip_cost=taker_round_trip_cost(step * Decimal(lv)),
         capped=capped,
         floored=floored,
     )

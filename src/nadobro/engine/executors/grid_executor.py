@@ -36,22 +36,11 @@ from src.nadobro.engine.types import (
 )
 
 
-# PROFIT-TIER MAKER (2026-08-08). D-Grid's tiered scale-out used to cross the
-# book with a reduce-only MARKET on every tier. A profit tier is DISCRETIONARY —
-# unlike a stop it has no deadline, so it can wait at the touch — and the standing
-# rule is that market-making strategies place limit orders only. It now rests
-# post-only and chases; only the stop-out flatten still crosses, because a stop
-# must act at a price a resting order cannot occupy.
-#
-# Distance from mid for the resting profit-tier close. 1.5 bp is the same maker
-# floor the ladder uses for its near-mid boundary, which the venue has never
-# rejected as crossing (error_code 2008). Priced off mid rather than the touch so
-# booking costs no extra order-book read per tick; inside a typical spread this
-# still improves the touch.
-_BOOK_MAKER_OFFSET = Decimal("0.00015")
-# A resting profit-tier close that has not filled by now is re-quoted at the fresh
-# mid, so a scale-out tracks the market instead of stranding behind it.
-_BOOK_REQUOTE_SECONDS = 20.0
+# TAKER RISK EXITS (2026-08-08, product ruling). Every risk exit in this executor
+# CROSSES: the stop-out flatten, the take-profit flatten, and D-Grid's profit-tier
+# scale-out via ``reduce_position``. Only entries and the ladder's paired per-level
+# close legs rest post-only — those have no deadline and earn the spread, while an
+# exit that may not fill is not an exit.
 
 
 class GridLevelState(Enum):
@@ -203,16 +192,11 @@ class GridExecutor(Executor):
         self.orders_placed = 0
         self.orders_filled = 0
         self.orders_cancelled = 0
-        # The resting reduce-only maker close that books a profit tier. At most
-        # one at a time: the caller asks for a slice each tick, and a second
-        # order would double-close it. Accumulators mirror the per-level ones so
-        # a multi-price partial fill is ingested as exact deltas.
-        self._book_order_id: Optional[str] = None
+        # Accumulators for an external reduce-only close (a profit tier), mirroring
+        # the per-level ones so a multi-price fill is ingested as exact deltas.
         self._book_recorded_base = Decimal(0)
         self._book_recorded_quote = Decimal(0)
         self._book_recorded_fee = Decimal(0)
-        self._book_placed_at = 0.0
-        self._book_too_small_logged = False
 
     @property
     def open_side(self) -> TradeType:
@@ -438,80 +422,11 @@ class GridExecutor(Executor):
         )
         return max(Decimal(0), held)
 
-    def _book_maker_price(self, mid: Decimal) -> Decimal:
-        """A price on the maker side of ``mid`` for the profit-tier close, never
-        worse than the average entry.
-
-        Strictly beyond mid, so a post-only order can never be rejected as
-        crossing (error_code 2008): above for a SELL close, below for a BUY. The
-        real adapter additionally rounds post-only AWAY from the book when it
-        aligns to the tick, so alignment cannot turn this into a taker either.
-
-        PROFIT-TIER FLOOR: the re-quote follows the fresh mid every
-        ``_BOOK_REQUOTE_SECONDS``, so on a reversal it would chase the market DOWN
-        and eventually fill below the average entry — booking a LOSS on the tier
-        that armed because the run was in PROFIT. The MARKET version could not do
-        that: it crossed at the tier price and banked it. So the price is floored
-        at the average entry, which keeps the whole point of a scale-out intact.
-        The floor can only push the quote FURTHER from mid, so it is still a maker
-        by construction; if price never comes back the tier simply does not book,
-        which is the honest maker-only outcome, and the session rail is the
-        backstop.
-        """
-        avg = self._avg_entry()
-        if self.close_side is TradeType.SELL:
-            price = mid * (Decimal(1) + _BOOK_MAKER_OFFSET)
-            if avg is not None and avg > 0:
-                price = max(price, avg * (Decimal(1) + _BOOK_MAKER_OFFSET))
-            return price
-        price = mid * (Decimal(1) - _BOOK_MAKER_OFFSET)
-        if avg is not None and avg > 0:
-            price = min(price, avg * (Decimal(1) - _BOOK_MAKER_OFFSET))
-        return price
-
-    async def release_book_order(self) -> Decimal:
-        """Cancel any resting profit-tier close, absorbing a last fill first.
-
-        For the controller to call when its slice is finished or moot: the order
-        hangs off this executor and only ``reduce_position`` drives it, so a
-        dropped slice would otherwise leave an unmanaged reduce-only maker on the
-        book — closing position the next phase is counting on, at a price derived
-        from a stale mid. Returns any base that filled in the race.
-        """
-        if self._book_order_id is None:
-            return Decimal(0)
-        oid = self._book_order_id
-        booked = Decimal(0)
-        try:
-            await self._guard(lambda: self.adapter.cancel_order(oid),
-                              label="grid_book_release")
-            self.orders_cancelled += 1
-        except Exception as exc:  # noqa: BLE001 - cancel is best-effort
-            logger.warning("grid %s: profit-tier release cancel failed for %s: %s",
-                           self.id, oid, exc)
-            return booked          # may still be live — keep managing it
-        try:
-            refreshed = await self._guard(lambda: self.adapter.order_status(oid),
-                                          label="grid_book_release_status")
-            booked += await self._ingest_book(refreshed)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("grid %s: profit-tier release re-poll failed for %s: %s",
-                           self.id, oid, exc)
-        self._clear_book_order()
-        return booked
-
-    def _clear_book_order(self) -> None:
-        self._book_order_id = None
-        self._book_recorded_base = Decimal(0)
-        self._book_recorded_quote = Decimal(0)
-        self._book_recorded_fee = Decimal(0)
-        self._book_placed_at = 0.0
-
     async def _ingest_book(self, order: NadoOrder) -> Decimal:
-        """Book the delta since the last poll of the resting profit-tier close.
+        """Book the fill of an external reduce-only close (a profit tier).
 
-        Mirrors :meth:`_ingest` (marginal price per chunk, fee delta passed
-        through) but against this executor's booking accumulators rather than a
+        Mirrors :meth:`_ingest` — marginal price for the chunk, fee delta passed
+        through — but against this executor's booking accumulators rather than a
         level's, and it advances per-level close accounting by the SAME delta so
         ``_net_base`` and the resting close legs stay consistent with the venue.
         Returns the base newly closed.
@@ -533,141 +448,59 @@ class GridExecutor(Executor):
         await self._advance_close_accounting(delta_base)
         return delta_base
 
-    async def _drive_book_order(self) -> Decimal:
-        """Poll the resting profit-tier close, absorbing fills; re-quote it when
-        stale. Returns the base newly closed this call."""
-        oid = self._book_order_id
-        if oid is None:
-            return Decimal(0)
-        order = await self._guard(
-            lambda: self.adapter.order_status(oid), label="grid_book_status",
-        )
-        booked = await self._ingest_book(order)
-        if order.state is OrderState.FILLED:
-            self.orders_filled += 1
-            self._clear_book_order()
-            return booked
-        if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
-            self._clear_book_order()
-            return booked
-        if time.time() - self._book_placed_at < _BOOK_REQUOTE_SECONDS:
-            return booked           # still working at a live price
-        # Stale: chase the market rather than cross it. Re-poll AFTER the cancel
-        # so a fill that landed in the race is absorbed instead of lost (BUG-GR-1
-        # at book-reduce time), then let the next call re-place at the fresh mid.
-        try:
-            await self._guard(lambda: self.adapter.cancel_order(oid), label="grid_book_requote")
-            self.orders_cancelled += 1
-        except Exception as exc:  # noqa: BLE001 - cancel is best-effort
-            logger.warning("grid %s: profit-tier re-quote cancel failed for %s: %s",
-                           self.id, oid, exc)
-            return booked           # order may still be live — do NOT clear state
-        try:
-            refreshed = await self._guard(
-                lambda: self.adapter.order_status(oid), label="grid_book_status_requote",
-            )
-            booked += await self._ingest_book(refreshed)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("grid %s: profit-tier post-cancel re-poll failed for %s: %s",
-                           self.id, oid, exc)
-        self._clear_book_order()
-        return booked
-
     async def reduce_position(
         self, amount_base: object, mid: Optional[Decimal] = None,
     ) -> Decimal:
-        """Work a reduce-only MAKER close for up to ``amount_base`` of held
-        inventory, and return the base that NEWLY closed during this call.
+        """Close up to ``amount_base`` of held inventory by CROSSING, and return
+        the base actually reduced.
 
-        MAKER-ONLY (2026-08-08). This used to fire one reduce-only MARKET and
-        return what it filled. It is the D-Grid profit-tier scale-out, and a
-        profit tier is discretionary: it has no deadline, so it can rest at the
-        touch instead of paying the spread on every tier. Only the stop-out
-        flatten still crosses.
+        TAKER RISK EXITS (2026-08-08, product ruling). This is D-Grid's profit-tier
+        scale-out — a risk exit, and every risk exit crosses now. A brief maker
+        experiment rested it post-only and chased the touch; that produced the
+        whole class of defects this replaced: a tier chasing a reversing mid until
+        it booked a LOSS, a slice stranded below one lot, an order orphaned on the
+        flat branch with nobody left to drive it, and a partial fill colliding with
+        the level close watermark. An exit that may not fill is not an exit.
+        Entries and the ladder's paired per-level close legs stay post-only —
+        those have no deadline and earn the spread.
 
-        The consequence for callers is that booking is now ASYNCHRONOUS — the
-        return value is a fill delta, usually 0 on the call that places the
-        order, so a caller must accumulate across ticks and must not treat one
-        call as "the slice is booked". At most one booking order rests at a time;
-        it is re-quoted at the fresh mid every ``_BOOK_REQUOTE_SECONDS`` so a
-        scale-out chases the market rather than stranding behind it.
+        Synchronous: a reduce-only MARKET either fills now or comes back unfilled,
+        and only what actually FILLED is booked. Booking the request regardless
+        would inject a phantom close at price 0 into inventory and wrongly advance
+        per-level accounting.
 
-        DGRID-BOOK-RACE fix (kept): dgrid tiered profit-booking used to fire a
-        naked ``adapter.place_order(... reduce_only ...)`` straight at the venue,
-        bypassing this executor. The booked reduction was then invisible here, so
-        the resting per-level close legs still tried to close the full
-        ``filled_base`` (rejected by reduce_only, but leaving levels stuck in
-        CLOSE_ORDER_PLACED) and the shared inventory net drifted from the venue.
-        Routing the reduction through here records the fill in the shared
-        inventory AND advances per-level close accounting (cancelling a fully
-        booked level's resting close leg) so the two views stay in sync.
+        DGRID-BOOK-RACE fix (kept): the reduction is routed THROUGH this executor
+        rather than fired at the adapter behind its back, so the fill lands in the
+        shared inventory AND advances per-level close accounting — its resting
+        close legs and the controller's net view cannot drift apart.
         """
         if self.is_terminated:
             return Decimal(0)
-        # Drive the resting order FIRST: its fills are what the caller books, and
-        # they must be absorbed even on a tick that asks for nothing more.
-        booked = await self._drive_book_order()
-        if self._book_order_id is not None:
-            return booked           # one booking order at a time
         amount = _dec(amount_base)
         if amount <= 0:
-            return booked
+            return Decimal(0)
         reduce = min(amount, self._unclosed_base())
         if reduce <= 0:
-            return booked
-        if mid is None:
-            mid = await self._guard(
-                lambda: self.adapter.mid_price(self.trading_pair), label="grid_book_mid",
-            )
-        mid = _dec(mid or 0)
-        if mid <= 0:
-            return booked
-        price = self._book_maker_price(mid)
-        # A slice too small to REST can only be closed by crossing (the adapter's
-        # EXIT-MIN-NOTIONAL escape would rewrite it to MARKET), and a profit tier
-        # is not worth crossing for. Hold it: the tier stays unbooked, so the next
-        # tier merges into a slice big enough to rest. The session TP rail is the
-        # backstop, and the top tier lands at the user's TP anyway.
-        try:
-            floor = _dec(self.adapter.min_notional(self.trading_pair) or 0)
-        except Exception:  # noqa: BLE001  # policy: degrade-ok(unknown floor ⇒ let the venue judge)
-            floor = Decimal(0)
-        if floor > 0 and reduce * price < floor:
-            if not self._book_too_small_logged:
-                logger.info(
-                    "grid %s: profit-tier slice %s x %s is under the venue minimum "
-                    "%s — holding it rather than crossing; it merges with the next "
-                    "tier (controller=%s)",
-                    self.id, reduce, price, floor, self.controller_id,
-                )
-                self._book_too_small_logged = True
-            return booked
-        self._book_too_small_logged = False
+            return Decimal(0)
+        # No min-notional guard: a MARKET order is not subject to the venue's
+        # RESTING minimum, which is exactly why crossing is the right tool for an
+        # exit that would otherwise be too small to place at all.
         order = await self._guard(
             lambda: self.adapter.place_order(
-                self.trading_pair, self.close_side, OrderType.LIMIT_MAKER,
-                reduce, price, self.config.leverage, True,
+                self.trading_pair, self.close_side, OrderType.MARKET,
+                reduce, None, self.config.leverage, True,
             ),
             label="grid_book_reduce",
         )
         if order is None:
-            return booked
-        self._book_order_id = order.id
+            return Decimal(0)
         self._book_recorded_base = Decimal(0)
         self._book_recorded_quote = Decimal(0)
         self._book_recorded_fee = Decimal(0)
-        self._book_placed_at = time.time()
         self.orders_placed += 1
-        # A maker order can still fill on placement (the book moved into it), and
-        # the adapter rewrites a sub-minimum reduce-only limit to MARKET — either
-        # way the ack may already carry fills, so ingest before returning.
-        booked += await self._ingest_book(order)
-        if self._book_order_id is not None and order.state in (
-            OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED,
-        ):
-            if order.state is OrderState.FILLED:
-                self.orders_filled += 1
-            self._clear_book_order()
+        booked = await self._ingest_book(order)
+        if booked > 0:
+            self.orders_filled += 1
         return booked
 
     async def _maybe_complete_level(self, lv: GridLevel) -> bool:
@@ -877,21 +710,6 @@ class GridExecutor(Executor):
 
     # -- stop / teardown --------------------------------------------------
     async def _cancel_all_resting(self) -> None:
-        # The profit-tier booking order hangs off the executor, not a level, so
-        # the level loop below cannot see it. Missing it here would leave a live
-        # reduce-only maker order on the venue after the executor is gone — it
-        # would close position the next phase is counting on (D-Grid flips via
-        # orchestrator.stop -> on_stop -> _stop_out -> here).
-        if self._book_order_id is not None:
-            bid = self._book_order_id
-            try:
-                await self._guard(lambda: self.adapter.cancel_order(bid), label="grid_cancel_book")
-                self.orders_cancelled += 1
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "grid %s: cancel-all failed for profit-tier order %s — it may "
-                    "still be resting: %s", self.id, bid, exc,
-                )
         for level in self.levels:
             for oid in (level.open_order_id, level.close_order_id):
                 if oid is not None:
@@ -915,24 +733,6 @@ class GridExecutor(Executor):
 
     async def _stop_out(self, close_type: CloseType) -> None:
         await self._cancel_all_resting()
-        # Absorb any last fill on the profit-tier order too, BEFORE the flatten
-        # sizes itself off _net_base(): a fill that landed in the cancel race is
-        # position already closed, and flattening for it as well would re-open the
-        # other way (reduce_only prevents that at the venue, but the executor's
-        # accounting would still be wrong).
-        if self._book_order_id is not None:
-            bid = self._book_order_id
-            try:
-                refreshed = await self._guard(
-                    lambda: self.adapter.order_status(bid), label="grid_book_status_stop",
-                )
-                await self._ingest_book(refreshed)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "grid %s: profit-tier stop-out re-poll failed for %s — flatten "
-                    "size may miss last fills: %s", self.id, bid, exc,
-                )
-            self._clear_book_order()
         # After cancelling open orders, re-poll levels to absorb any last
         # partial fills (BUG-GR-1 again at stop-out time).
         for level in self.levels:

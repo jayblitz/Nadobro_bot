@@ -924,11 +924,21 @@ def map_strategy_config(
     # SL/TP honor the per-strategy fields (rgrid/dgrid store them under
     # rgrid_stop_loss_pct / rgrid_take_profit_pct), so a user's custom value
     # drives the barrier instead of the sl_pct/tp_pct default.
-    from src.nadobro.strategy.strategy_registry import effective_sl_tp_pct
+    from src.nadobro.strategy.strategy_registry import (
+        effective_sl_tp_pct, sltp_is_explicit,
+    )
     _sl_pct, _tp_pct = effective_sl_tp_pct(strategy, settings)
-    if _tp_pct <= 0:
+    # Only substitute a default when the user configured NOTHING. A key that is
+    # PRESENT and 0 is a deliberate disarm, and overriding it re-arms what they
+    # switched off — DGRID-TP-DISARM-PHANTOM: an explicit TP of 0 became 0.6, so
+    # D-Grid scaled out a third of the position at 0.2% of margin (a ~1bp move)
+    # for a user who had disarmed TP precisely to let a trend run. It also made
+    # dynamic_grid's documented "no TP set keeps the legacy tiers" branch
+    # unreachable from the mapper.
+    _sl_set, _tp_set = sltp_is_explicit(strategy, settings)
+    if _tp_pct <= 0 and not _tp_set:
         _tp_pct = _f(settings, "tp_pct", 0.6)
-    if _sl_pct <= 0:
+    if _sl_pct <= 0 and not _sl_set:
         _sl_pct = _f(settings, "sl_pct", 0.5)
     # UNITS INVARIANT (CLAUDE.md): a user value is either a price-move barrier OR a
     # %-of-margin rail — never both. ``_tp_pct`` / ``_sl_pct`` are the user's
@@ -1286,6 +1296,10 @@ def map_strategy_config(
             chunk_quote=_chunk_dec,
             stop_budget_usd=_rg_margin * _rg_sl_pct / 100.0,
             min_step_usd=DEFAULT_MIN_ORDER_NOTIONAL_USD,
+            # R-Grid's own exit triggers a band away, so the cap must bound a full
+            # band of adverse move on the PYRAMID, not just its fees — otherwise
+            # the session rail always fires before the exit can trigger.
+            band_frac=_band,
         )
         if _step_plan.capped:
             logger.info(

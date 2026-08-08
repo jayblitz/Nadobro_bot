@@ -133,13 +133,11 @@ class DynamicGridController(Controller):
         self.tp_tiers_pct = _parse_tp_tiers(self.cfg("dgrid_tp_tiers_pct"))
         self.tp_fraction = min(1.0, max(0.0, float(self.cfg("dgrid_tp_fraction", 0.33) or 0.33)))
         self._booked_tiers: set[int] = set()
-        # The slice currently being worked by a resting MAKER close. Booking is
-        # asynchronous now (PROFIT-TIER MAKER, 2026-08-08): the executor rests a
-        # post-only reduce-only order and reports fills over several ticks, so a
-        # tier is credited to ``_booked_tiers`` only once its slice has actually
-        # closed. Crediting on the first partial — what the MARKET version could
-        # get away with, since it filled or didn't within one call — would consume
-        # the tier and leave the profit unbooked.
+        # The slice currently being scaled out. A tier is credited to
+        # ``_booked_tiers`` only once its slice has really closed: a reduce-only
+        # MARKET normally fills in one call, but on a thin book it can come back
+        # short, and crediting the tier for base that never closed would consume it
+        # while the profit stayed unbooked.
         self._book_slice: Optional[_BookSlice] = None
         # Re-center is ON by default so the grid tracks price (the whole point of
         # a *dynamic* grid). The executor re-center only re-quotes unfilled maker
@@ -619,11 +617,11 @@ class DynamicGridController(Controller):
         it. Each tier books once per run; the ladder resets on a fresh
         spawn/flip.
 
-        MAKER-ONLY (2026-08-08). The scale-out rests post-only and chases instead
-        of crossing on every tier: a profit tier is discretionary, so unlike a stop
-        it can wait at the touch. Only the stop-out flatten still crosses. That
-        makes booking ASYNCHRONOUS, so the slice being worked is tracked in
-        ``_book_slice`` and its tiers are credited only once it has really closed.
+        TAKER RISK EXITS (2026-08-08, product ruling): the scale-out CROSSES, like
+        every other risk exit. ``_book_slice`` still tracks the slice and still
+        credits a tier only against real fills — a reduce-only MARKET can come back
+        partially filled on a thin book, and crediting the tier for base that never
+        closed would consume it while the profit stayed unbooked.
         """
         if (not self.tp_tiers_pct or self.tp_fraction <= 0 or self.inventory is None
                 or mid is None or mid <= 0):
@@ -638,21 +636,8 @@ class DynamicGridController(Controller):
             # fresh position starts from a clean ladder instead of re-quoting a
             # close for a position that no longer exists.
             if self._book_slice is not None:
-                # Release the resting order FIRST. Dropping the slice without it
-                # left an unmanaged reduce-only maker on the book: only
-                # reduce_position drives that order, and with no slice nothing
-                # calls it again — so on a recycling grid it would sit at a stale
-                # price and later close inventory the fresh levels are counting on.
-                for ex in self.my_executors(active_only=True):
-                    release = getattr(ex, "release_book_order", None)
-                    if release is not None:
-                        try:
-                            await release()
-                        except Exception:  # noqa: BLE001 - best-effort teardown
-                            logger.warning(
-                                "dgrid %s: releasing the profit-tier order failed",
-                                self.id, exc_info=True,
-                            )
+                # Nothing to release: a profit tier CROSSES now, so it never
+                # leaves an order resting on the book to be orphaned here.
                 self._booked_tiers |= self._book_slice.tiers
                 self._book_slice = None
             return

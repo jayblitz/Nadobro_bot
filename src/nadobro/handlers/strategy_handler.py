@@ -1666,11 +1666,15 @@ def rgrid_step_plan(conf: dict, sl_pct_val: float):
     deploy_margin = _effective_margin_usd(conf)
     rail_margin = session_margin_usd(conf) or deploy_margin
     levels = max(1, int(float(conf.get("levels", 4) or 4)))
+    # The same band engine_runtime derives (spread_bp -> fraction, 10bp default),
+    # so the card's cap matches the engine's on the price bound too.
+    _band_bp = float(conf.get("rgrid_spread_bp", conf.get("spread_bp", 10.0)) or 10.0)
     return rail_margin, resolve_step_quote(
         deployed_quote=deploy_margin * _mm_effective_leverage(conf),
         levels=levels,
         stop_budget_usd=rail_margin * max(0.0, sl_pct_val) / 100.0,
         min_step_usd=DEFAULT_MIN_ORDER_NOTIONAL_USD,
+        band_frac=(_band_bp / 10000.0) if _band_bp > 0 else 0.001,
     )
 
 

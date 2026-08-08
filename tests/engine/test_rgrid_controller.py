@@ -189,28 +189,32 @@ def test_discretion_windows_each_leg_independently():
 
 def test_both_legs_feed_the_exposure_window():
     """Essential to the definition: the anchor is the average of the buy AND sell
-    exposure prices, so excluding the reducing leg would leave the sell exposure
-    price permanently undefined. Safe because the fill price was CHOSEN by a
-    resting post-only quote, not taken from whatever the market offered."""
+    exposure prices, so excluding the reducing side would leave the sell exposure
+    price permanently undefined.
+
+    ENTRIES REST, EXITS CROSS: the reducing side is a crossing trigger now rather
+    than a resting quote, so the sell fill arrives from the exposure-band exit. It
+    must still feed the sell window — the anchor is what it is regardless of which
+    order type produced the fill."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=True)
         orch, c = _controller(adapter)
         await orch.spawn_controller(c)
         # A live long of 2, so a PARTIAL reducing fill leaves the book non-flat and
         # the flat re-anchor (which correctly clears the window) does not fire.
         c.inventory.apply_fill(1, PAIR, c.id, TradeType.BUY, Decimal(2), Decimal(200), Decimal(0))
-        _seed_leg(c, "buy", 100, Decimal(2))     # anchor 100 -> sell leg at 99.9
-        adapter.set_mid(Decimal("99"))           # below the sell leg -> postable
+        _seed_leg(c, "buy", 100, Decimal(2))     # anchor 100 -> sell trigger at 99.9
+        adapter.set_mid(Decimal("99"))           # through the trigger -> exit fires
         await orch.tick_controller(c.id)
-        sells = _resting(adapter, TradeType.SELL)
-        assert sells, "the sell leg should be resting"
-        adapter.fill_order(sells[-1].id)
-        # Tick the EXECUTOR (to ingest the fill) and absorb directly, rather than
-        # ticking the controller: the same controller tick that absorbs the fill
-        # also sees a flat book and correctly re-anchors, clearing the window, so a
-        # full tick cannot observe the intermediate state.
-        for ex_id in list(c._resting.values()):
-            await orch.tick(ex_id)
+        crossing = [o for o in adapter.placed
+                    if o.side is TradeType.SELL and o.order_type is OrderType.MARKET]
+        assert crossing, "the exposure-band exit should have crossed"
+        # Ingest the crossing fill, then absorb directly rather than ticking the
+        # controller: the same controller tick that absorbs it also sees a flat book
+        # and correctly re-anchors, clearing the window, so a full tick cannot
+        # observe the intermediate state.
+        if c._stop_id is not None:
+            await orch.tick(c._stop_id)
         c._absorb_fills()
         assert c.leg_exposure_price("sell") is not None, (
             "a reducing fill never reached the sell exposure window"

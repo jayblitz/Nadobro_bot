@@ -42,17 +42,28 @@ def test_no_budget_means_no_cap():
 
 
 def test_the_reported_session_is_capped():
-    """$100 margin at 49x over 4 levels: a $1,225 step whose $1.05 round trip
-    exceeds the whole $0.80 stop budget."""
+    """$100 margin at 49x over 4 levels wants a $1,225 step — a $4,900 PYRAMID
+    whose round trip is $4.21, more than five times the whole $0.80 stop.
+
+    The bound is on the pyramid, so this configuration cannot be traded at any
+    placeable size: the cap lands on the venue floor and FLAGS it (``floored``),
+    which the card renders as "🚨 Stop too tight to trade". That is the honest
+    answer — the previous per-step bound certified ~3 round trips of headroom
+    that did not exist."""
     plan = resolve_step_quote(
         deployed_quote=Decimal(4900), levels=4,
         stop_budget_usd=Decimal("0.80"), min_step_usd=100,
     )
     assert plan.uncapped == Decimal(1225)
-    assert plan.capped is True and plan.floored is False
-    assert plan.step < plan.uncapped
-    assert plan.round_trip_cost < plan.stop_budget_usd
-    assert plan.round_trips_in_budget >= 3
+    assert plan.capped is True and plan.floored is True
+    assert plan.step == Decimal(100)
+    # The reported cost is the PYRAMID's, so the card cannot overstate the room:
+    # even at the floored $100 step the 4-level pyramid's round trip is $0.344,
+    # 43% of the $0.80 stop — past the 33% share, which is WHY it floored.
+    assert plan.round_trip_cost == Decimal("0.34400")
+    assert plan.round_trips_in_budget < 3, (
+        "floored means the cap could not reach its round-trip target"
+    )
 
 
 def test_the_users_example_is_capped():
@@ -63,13 +74,20 @@ def test_the_users_example_is_capped():
     )
     assert plan.uncapped == Decimal(500)
     assert plan.capped is True and plan.step < Decimal(500)
-    assert plan.round_trips_in_budget >= 3
+    # The bound is on the PYRAMID (levels x step), so at 10 levels a $1.00 stop
+    # cannot fund a tradeable size at all: the cap lands on the venue floor and
+    # says so, rather than certifying headroom that does not exist.
+    assert plan.floored is True and plan.step == Decimal(100)
 
 
 def test_a_step_that_already_fits_is_untouched():
+    """A step fits when the PYRAMID's round trip fits. deployed 500 / 4 levels is
+    a $125 step, i.e. a $500 pyramid whose round trip is $0.43 — 43% of a $1.00
+    stop, past the 33% share — so it is capped. Give it a stop that genuinely
+    affords the pyramid and nothing moves."""
     plan = resolve_step_quote(
         deployed_quote=Decimal(500), levels=4,
-        stop_budget_usd=Decimal("1.00"), min_step_usd=100,
+        stop_budget_usd=Decimal("5.00"), min_step_usd=100,
     )
     assert plan.capped is False and plan.step == plan.uncapped == Decimal(125)
 

@@ -162,15 +162,12 @@ def test_reduce_position_books_through_executor_and_advances_accounting():
     close accounting, so fully booked levels complete and their resting close legs
     are cancelled and the executor and the venue can't drift apart.
 
-    PROFIT-TIER MAKER (2026-08-08): the close now RESTS post-only instead of
-    crossing, so booking is asynchronous — the call that places the order returns
-    0 and the fill is reported by a later call."""
+    TAKER RISK EXITS: it crosses, so it returns what it closed synchronously."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(105))
         inv = InventoryRepository()
         ex = _ex(_cfg(), adapter, inv)
         await ex.on_create()
-        # Fill two open levels → held long inventory + resting close legs.
         held_levels = ex.levels[:2]
         for lv in held_levels:
             adapter.fill_order(lv.open_order_id, price=lv.open_price)
@@ -180,32 +177,19 @@ def test_reduce_position_books_through_executor_and_advances_accounting():
         one_level_base = held_levels[0].filled_base
         cancelled_before = len(adapter.cancelled)
 
-        # 1. Places a RESTING maker close. Nothing is booked yet.
-        assert await ex.reduce_position(one_level_base) == Decimal(0)
-        assert ex._book_order_id is not None
-        book_order = next(o for o in adapter.placed if o.id == ex._book_order_id)
-        assert book_order.order_type is OrderType.LIMIT_MAKER, "must not cross"
-        assert abs(float(book_order.amount_base - one_level_base)) < 1e-9
+        booked = await ex.reduce_position(one_level_base)
 
-        # 2. It fills; the NEXT call reports it and does the accounting.
-        adapter.fill_order(ex._book_order_id)
-        booked = await ex.reduce_position(Decimal(0))
-
-        assert booked > 0
+        assert booked > 0, "a crossing exit must book in the same call"
         net_after = inv.get(1, PAIR, "c").net_amount_base
-        # Inventory net dropped by (about) the booked amount — views stay in sync.
-        assert net_after < net_before
         assert abs(float(net_before - net_after - booked)) < 1e-9
-        # The fully-booked level completed and its resting close leg was cancelled.
         assert any(lv.state is GridLevelState.COMPLETE for lv in ex.levels)
         assert len(adapter.cancelled) > cancelled_before
-        assert ex._book_order_id is None, "a filled booking order must be cleared"
 
     asyncio.run(body())
 
 
 def test_reduce_position_caps_at_held_inventory():
-    """Asking to reduce more than is held only works what's actually held."""
+    """Asking to reduce more than is held only books what's actually held."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(105))
         inv = InventoryRepository()
@@ -215,19 +199,18 @@ def test_reduce_position_caps_at_held_inventory():
         adapter.fill_order(lv.open_order_id, price=lv.open_price)
         await ex.on_tick()
         held = lv.filled_base
-        await ex.reduce_position(held * Decimal(10))  # ask for way more
-        rested = next(o for o in adapter.placed if o.id == ex._book_order_id)
-        assert abs(float(rested.amount_base - held)) < 1e-9
-        adapter.fill_order(rested.id)
-        assert abs(float(await ex.reduce_position(Decimal(0)) - held)) < 1e-9
+        booked = await ex.reduce_position(held * Decimal(10))   # ask for way more
+        assert abs(float(booked - held)) < 1e-9
 
     asyncio.run(body())
 
 
-def test_the_profit_tier_close_rests_on_the_maker_side_and_never_crosses():
-    """A profit tier is discretionary — unlike a stop it has no deadline — so it
-    rests post-only. The price must be strictly BEYOND mid or the venue rejects a
-    post-only order as crossing (error_code 2008)."""
+def test_the_profit_tier_exit_crosses():
+    """TAKER RISK EXITS (2026-08-08). A profit tier is a risk exit, so it crosses.
+    The maker version rested post-only and chased the touch, which is what let a
+    tier chase a reversing mid until it booked a LOSS, strand below one lot, and
+    orphan an order nobody was left to drive. The ladder's own paired close legs
+    stay post-only — those are the strategy, not a risk exit."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(105))
         ex = _ex(_cfg(), adapter, InventoryRepository())
@@ -235,76 +218,26 @@ def test_the_profit_tier_close_rests_on_the_maker_side_and_never_crosses():
         lv = ex.levels[0]
         adapter.fill_order(lv.open_order_id, price=lv.open_price)
         await ex.on_tick()
+        opens = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        assert not opens, "the ladder itself must not cross"
 
-        await ex.reduce_position(lv.filled_base, mid=Decimal(105))
-        rested = next(o for o in adapter.placed if o.id == ex._book_order_id)
-        # Long grid ⇒ SELL close ⇒ strictly above mid.
-        assert rested.order_type is OrderType.LIMIT_MAKER
-        assert rested.price is not None and rested.price > Decimal(105)
-        assert not [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        await ex.reduce_position(lv.filled_base)
 
-    asyncio.run(body())
-
-
-def test_only_one_profit_tier_order_rests_at_a_time():
-    """Two resting closes for the same slice would double-close the position."""
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
-        ex = _ex(_cfg(), adapter, InventoryRepository())
-        await ex.on_create()
-        for lv in ex.levels[:2]:
-            adapter.fill_order(lv.open_order_id, price=lv.open_price)
-        await ex.on_tick()
-
-        await ex.reduce_position(ex.levels[0].filled_base, mid=Decimal(105))
-        first = ex._book_order_id
-        for _ in range(3):
-            assert await ex.reduce_position(ex.levels[1].filled_base,
-                                            mid=Decimal(105)) == Decimal(0)
-        assert ex._book_order_id == first, "re-placed over a live booking order"
-        assert len([o for o in adapter.placed if o.id == first]) == 1
+        crossing = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        assert len(crossing) == 1, "the tier exit did not cross"
+        assert crossing[0].side is ex.close_side
+        # ...and the ladder's own legs are still makers.
+        ladder = [o for o in adapter.placed if o.order_type is OrderType.LIMIT_MAKER]
+        assert ladder, "the paired close legs must still rest post-only"
 
     asyncio.run(body())
 
 
-def test_a_stale_profit_tier_close_is_requoted_not_crossed():
-    """An unfilled scale-out must chase the market rather than strand behind it —
-    and chasing means a fresh post-only quote, never a cross."""
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
-        ex = _ex(_cfg(), adapter, InventoryRepository())
-        await ex.on_create()
-        lv = ex.levels[0]
-        adapter.fill_order(lv.open_order_id, price=lv.open_price)
-        await ex.on_tick()
-
-        await ex.reduce_position(lv.filled_base, mid=Decimal(105))
-        stale_id = ex._book_order_id
-        cancelled_before = len(adapter.cancelled)
-
-        # Age it past the re-quote deadline, then drive it twice: once to cancel
-        # the stale quote, once to re-place at the fresh mid.
-        ex._book_placed_at -= 10_000
-        await ex.reduce_position(lv.filled_base, mid=Decimal(107))
-        assert stale_id in adapter.cancelled
-        assert len(adapter.cancelled) > cancelled_before
-        await ex.reduce_position(lv.filled_base, mid=Decimal(107))
-
-        assert ex._book_order_id is not None and ex._book_order_id != stale_id
-        fresh = next(o for o in adapter.placed if o.id == ex._book_order_id)
-        assert fresh.order_type is OrderType.LIMIT_MAKER
-        assert fresh.price is not None and fresh.price > Decimal(107), (
-            "the re-quote must track the new mid, still on the maker side"
-        )
-        assert not [o for o in adapter.placed if o.order_type is OrderType.MARKET]
-
-    asyncio.run(body())
-
-
-def test_a_profit_tier_slice_too_small_to_rest_is_held_not_crossed():
-    """Under the venue minimum a resting order can never fill, and the adapter
-    would rewrite it to MARKET. A profit tier is not worth crossing for: hold the
-    slice so the next tier merges into one big enough to rest."""
+def test_a_sub_minimum_slice_still_exits_because_it_crosses():
+    """The maker version HELD a slice under the venue minimum, because a resting
+    order that small can never fill. Crossing has no such floor — a MARKET order is
+    not subject to the resting minimum — so the exit always goes out. This is one
+    of the concrete reasons risk exits cross."""
     async def body():
         adapter = MockNadoAdapter(mid=Decimal(105), min_notional=Decimal(1_000_000))
         ex = _ex(_cfg(), adapter, InventoryRepository())
@@ -312,37 +245,14 @@ def test_a_profit_tier_slice_too_small_to_rest_is_held_not_crossed():
         lv = ex.levels[0]
         adapter.fill_order(lv.open_order_id, price=lv.open_price)
         await ex.on_tick()
-        placed_before = len(adapter.placed)
 
-        assert await ex.reduce_position(lv.filled_base, mid=Decimal(105)) == Decimal(0)
-        assert ex._book_order_id is None
-        assert len(adapter.placed) == placed_before, "nothing may be sent"
-        assert not [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        booked = await ex.reduce_position(lv.filled_base)
 
-    asyncio.run(body())
-
-
-def test_a_resting_profit_tier_close_is_cancelled_on_teardown():
-    """The booking order hangs off the executor, not a level, so cancel-all has to
-    know about it — otherwise it outlives the executor and closes position the next
-    D-Grid phase is counting on."""
-    async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
-        ex = _ex(_cfg(keep_position=True), adapter, InventoryRepository())
-        await ex.on_create()
-        lv = ex.levels[0]
-        adapter.fill_order(lv.open_order_id, price=lv.open_price)
-        await ex.on_tick()
-        await ex.reduce_position(lv.filled_base, mid=Decimal(105))
-        book_id = ex._book_order_id
-        assert book_id is not None
-
-        await ex.on_stop(CloseType.EARLY_STOP)
-
-        assert book_id in adapter.cancelled, "the booking order outlived the executor"
-        assert ex._book_order_id is None
+        assert booked > 0, "a sub-minimum exit was refused — the position strands"
+        assert [o for o in adapter.placed if o.order_type is OrderType.MARKET]
 
     asyncio.run(body())
+
 
 
 def test_reduce_position_books_nothing_on_zero_fill():
@@ -445,9 +355,10 @@ def test_a_PARTIAL_profit_tier_booking_does_not_destroy_the_levels_close_fill():
     ``_ingest`` assigns it ABSOLUTELY as the close ORDER's cumulative-fill
     watermark, while the booking path INCREMENTED it as a held-inventory counter.
 
-    A tier that books less than a level's ``filled_base`` leaves the level in
-    CLOSE_ORDER_PLACED (the completion branch needs >= filled_base), so
-    ``_process_level`` polls that close order again — and ``_ingest`` then
+    An external close (a profit tier, or the stop-out flatten) that books less
+    than a level's ``filled_base`` leaves the level in CLOSE_ORDER_PLACED (the
+    completion branch needs >= filled_base), so ``_process_level`` polls that
+    close order again — and ``_ingest`` then
     subtracts the tier's base from the close order's real fills. The fill is
     under-counted or discarded entirely, its price is computed against an
     un-advanced quote watermark (so it reports a wildly wrong price), and the
@@ -469,9 +380,7 @@ def test_a_PARTIAL_profit_tier_booking_does_not_destroy_the_levels_close_fill():
         # A tier books HALF the level — the normal case, since a slice is a
         # fraction (default 33%) of the whole position.
         half = held / 2
-        await ex.reduce_position(half, mid=Decimal(105))
-        adapter.fill_order(ex._book_order_id)
-        booked = await ex.reduce_position(Decimal(0), mid=Decimal(105))
+        booked = await ex.reduce_position(half)
         assert booked == half
         assert lv.state is GridLevelState.CLOSE_ORDER_PLACED, (
             "premise: a partial booking leaves the level's close leg live"
@@ -517,9 +426,7 @@ def test_the_price_of_a_close_fill_after_a_partial_booking_is_real():
         await ex.on_tick()
         half = lv.filled_base / 2
 
-        await ex.reduce_position(half, mid=Decimal(105))
-        adapter.fill_order(ex._book_order_id)
-        await ex.reduce_position(Decimal(0), mid=Decimal(105))
+        await ex.reduce_position(half)
         adapter.fill_order(lv.close_order_id, amount=half, price=lv.close_price)
         await ex.on_tick()
 

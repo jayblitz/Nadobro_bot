@@ -89,6 +89,25 @@ def effective_sl_tp_pct(strategy: str, conf: Mapping) -> tuple[float, float]:
         return _f(sl), _f(tp)
     return _f(conf.get("sl_pct")), _f(conf.get("tp_pct"))
 
+
+def sltp_is_explicit(strategy: str, conf: Mapping) -> tuple[bool, bool]:
+    """``(sl_set, tp_set)`` — whether the user's own key is PRESENT for this
+    strategy, even when its value is 0.
+
+    ``effective_sl_tp_pct`` already returns 0.0 for a deliberately disarmed stop,
+    but a caller cannot tell that apart from "never configured" and so may
+    substitute a default, re-arming what the user switched off. That is exactly
+    what DGRID-TP-DISARM-PHANTOM was: an explicit ``rgrid_take_profit_pct = 0``
+    became 0.6, arming a tier ladder at [0.2, 0.4, 0.6]% of margin while the rail
+    stayed disarmed. Key order mirrors ``effective_sl_tp_pct`` exactly.
+    """
+    s = str(strategy or "").lower()
+    if s in _RGRID_SLTP_STRATEGIES:
+        sl_set = conf.get("rgrid_stop_loss_pct") is not None or conf.get("sl_pct") is not None
+        tp_set = conf.get("rgrid_take_profit_pct") is not None or conf.get("tp_pct") is not None
+        return sl_set, tp_set
+    return conf.get("sl_pct") is not None, conf.get("tp_pct") is not None
+
 STRATEGY_ALIASES: Mapping[str, str] = {
     "mm": STRATEGY_GRID,
     "market_making": STRATEGY_GRID,

@@ -359,15 +359,11 @@ def test_dgrid_tp_tiers_receive_a_percent_not_a_fraction():
 
 
 # ==========================================================================
-# Self-audit 2026-08-08 (pre-merge, whole branch) — [VERIFIED] findings that
-# need a PRODUCT decision, recorded as strict xfails per the triage protocol
-# rather than fixed silently. Each must be either fixed (delete the marker in
-# the same PR) or consciously accepted before this ladder changes again.
+# Self-audit 2026-08-08 (pre-merge, whole branch). These were recorded as strict
+# xfails and then FIXED, so the markers are gone and they are live regressions
+# tests now — the step cap bounds the PYRAMID (levels * step) on both the fee and
+# the adverse-price axis, and a disarmed TP no longer arms a phantom tier ladder.
 # ==========================================================================
-@pytest.mark.xfail(strict=True, reason="RGRID-STEP-EXIT-FEE: the stop-budget step "
-                   "cap prices the round trip at ONE step, but the trailing stop "
-                   "crosses the WHOLE pyramided position, so the real exit fee can "
-                   "be several times what the cap budgeted")
 def test_the_rgrid_step_cap_budgets_the_exit_it_will_actually_pay():
     """R-Grid pyramids: each break adds a step, so exposure grows to
     ``levels * step`` (bounded by the net-exposure cap). The trailing stop then
@@ -387,6 +383,7 @@ def test_the_rgrid_step_cap_budgets_the_exit_it_will_actually_pay():
     plan = resolve_step_quote(
         deployed_quote=deployed, levels=levels,
         stop_budget_usd=Decimal("0.80"),          # 0.8% of $100
+        band_frac=Decimal("0.001"),
     )
     pyramid = plan.step * Decimal(levels)
     exit_fee = pyramid * (Decimal(str(TAKER_ROUND_TRIP_RATE)) / Decimal(2))
@@ -397,11 +394,6 @@ def test_the_rgrid_step_cap_budgets_the_exit_it_will_actually_pay():
     )
 
 
-@pytest.mark.xfail(strict=True, reason="RGRID-STEP-PRICE-BOUND: the step cap "
-                   "bounds FEES only; nothing bounds the pyramided position "
-                   "against the stop budget's adverse-PRICE tolerance, so at high "
-                   "leverage the session rail fires before R-Grid's own exit "
-                   "geometry can become postable")
 def test_the_rgrid_pyramid_can_move_a_band_before_the_rail_fires():
     """R-Grid's own exit needs a full ``band`` pullback to become postable. If the
     pyramid is large enough that ``band`` of adverse move exceeds the stop budget,
@@ -413,7 +405,7 @@ def test_the_rgrid_pyramid_can_move_a_band_before_the_rail_fires():
 
     band, budget = Decimal("0.001"), Decimal("0.80")     # 10bp band, $0.80 stop
     plan = resolve_step_quote(deployed_quote=Decimal(5000), levels=4,
-                              stop_budget_usd=budget)
+                              stop_budget_usd=budget, band_frac=band)
     pyramid = plan.step * Decimal(4)
     loss_at_one_band = pyramid * (band + Decimal(str(TAKER_ROUND_TRIP_RATE)))
     assert loss_at_one_band <= budget, (
@@ -423,10 +415,6 @@ def test_the_rgrid_pyramid_can_move_a_band_before_the_rail_fires():
     )
 
 
-@pytest.mark.xfail(strict=True, reason="DGRID-TP-DISARM-PHANTOM: an explicitly "
-                   "disarmed TP is replaced by a 0.6 default, so a tier ladder "
-                   "arms at [0.2, 0.4, 0.6]% of margin for a user who chose to "
-                   "let the trend run")
 def test_a_disarmed_dgrid_tp_does_not_arm_a_phantom_tier_ladder():
     """``map_strategy_config`` substitutes ``_tp_pct = _f(settings, "tp_pct", 0.6)``
     whenever the strategy's own key resolves to <= 0. For dgrid the key is

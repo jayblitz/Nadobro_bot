@@ -143,10 +143,15 @@ def test_rgrid_step_is_capped_against_the_stop_budget():
         {"notional_usd": 100.0, "levels": 4, "mm_leverage_override": 49}, 0.8
     )
     assert room["uncapped_step_usd"] == 1225.0
-    assert room["capped"] is True and room["floored"] is False
+    assert room["capped"] is True
     assert room["step_usd"] < room["uncapped_step_usd"]
-    assert room["round_trip_usd"] < room["budget_usd"], "fees must fit inside the stop"
-    assert room["round_trips"] >= 3.0
+    # The bound is on the PYRAMID (levels x step) — $4,900 of exposure, not one
+    # $1,225 break — so this configuration cannot be traded at any placeable size.
+    # The cap lands on the venue floor and FLAGS it rather than certifying headroom
+    # that does not exist (the old per-step bound claimed ~3 round trips fit).
+    assert room["floored"] is True
+    assert room["step_usd"] == 100.0
+    assert room["round_trips"] < 3.0
 
     # The user's example: 50x on $100 over 10 steps with a 1% stop.
     thin = rgrid_stop_headroom(
@@ -154,14 +159,19 @@ def test_rgrid_step_is_capped_against_the_stop_budget():
     )
     assert thin["capped"] is True
     assert thin["uncapped_step_usd"] == 500.0 and thin["step_usd"] < 500.0
-    assert thin["round_trips"] >= 3.0
+    # Also unreachable: a 10-level pyramid at the $100 floor is $1,000 of exposure,
+    # whose round trip is $0.86 — 86% of the $1.00 stop. Flagged, not pretended.
+    assert thin["floored"] is True and thin["round_trips"] < 3.0
 
 
 def test_a_step_that_already_fits_is_left_alone():
+    """A step fits when the PYRAMID's round trip fits inside the share of the stop.
+    5x on $100 over 4 levels is a $125 step = $500 of pyramid, whose $0.43 round
+    trip needs a stop of at least ~$1.30 to stay under the 33% share."""
     from src.nadobro.handlers.strategy_handler import rgrid_stop_headroom
 
     room = rgrid_stop_headroom(
-        {"notional_usd": 100.0, "levels": 4, "mm_leverage_override": 5}, 1.0
+        {"notional_usd": 100.0, "levels": 4, "mm_leverage_override": 5}, 5.0
     )
     assert room["capped"] is False
     assert room["step_usd"] == room["uncapped_step_usd"] == 125.0
@@ -270,11 +280,13 @@ def test_rgrid_risk_card_explains_the_cap_and_its_failure_modes():
         base.update(conf)
         return _strategy_config_section_text("rgrid", base, "mainnet", "risk")
 
-    # Capped: informational, tells the user what it cost them.
-    capped = _card(rgrid_stop_loss_pct=0.8)
+    # Capped: informational, tells the user what it cost them. Needs a stop big
+    # enough that the PYRAMID's bound still lands above the venue minimum — at
+    # 4 levels that is a budget over ~$1.05, i.e. an SL above ~1.05% of $100.
+    capped = _card(rgrid_stop_loss_pct=2.0)
     assert "Step capped to" in capped and "round trips" in capped
     # Floored but workable: thin, not broken.
-    thin = _card(rgrid_stop_loss_pct=0.2)
+    thin = _card(rgrid_stop_loss_pct=0.8)
     assert "Thin" in thin and "venue minimum" in thin
     # Floored and unworkable: fees exceed the whole stop even at the minimum.
     broken = _card(rgrid_stop_loss_pct=0.05)
@@ -283,7 +295,7 @@ def test_rgrid_risk_card_explains_the_cap_and_its_failure_modes():
     off = _card(rgrid_stop_loss_pct=0.0, sl_pct=0.0)
     assert "disarmed" in off
     # Comfortable: no note, but the numbers are still shown.
-    calm = _card(mm_leverage_override=5, rgrid_stop_loss_pct=1.0)
+    calm = _card(mm_leverage_override=5, rgrid_stop_loss_pct=5.0)
     assert "Step capped" not in calm and "Thin" not in calm
     assert "Stop budget" in calm and "per break" in calm
 
@@ -295,7 +307,9 @@ def test_rgrid_stop_headroom_counts_round_trips_against_the_margin_budget():
         {"notional_usd": 100.0, "levels": 10, "mm_leverage_override": 50}, 1.0
     )
     assert room["budget_usd"] == 1.0                 # 1% of $100 margin
-    # The uncapped $500 step would cost $0.43 per round trip (43% of the budget);
-    # after the cap the same budget covers ~3.
-    assert round(room["uncapped_step_usd"] * 0.00086, 2) == 0.43
-    assert room["round_trips"] >= 3.0
+    # Round trips are counted against the PYRAMID (levels x step), which is the
+    # exposure an exit actually closes. The uncapped $500 step is $5,000 of
+    # pyramid — $4.30 a round trip against a $1.00 stop — so even the floored $100
+    # step leaves barely one, and the card says so instead of claiming three.
+    assert round(room["uncapped_step_usd"] * 10 * 0.00086, 2) == 4.30
+    assert room["floored"] is True and room["round_trips"] < 3.0
