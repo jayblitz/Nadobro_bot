@@ -38,10 +38,13 @@ OVERLAY_STRATEGIES = ("grid", "rgrid", "dgrid", "mid")
 #            quotes. Standing it down leaves it dark for no benefit.
 #   * rgrid — Reverse Grid's whole thesis is following a move. Pausing it in a
 #            trend is backwards, and pausing it mid-position leaves the book
-#            exposed with no one managing the exit. It is protected instead by
-#            tightening its trailing soft reset (the exit leg follows sooner),
-#            which reduces risk WITHOUT abandoning the position.
-# Both keep their configured net-exposure cap and their session SL/TP rails.
+#            exposed with no one managing the exit. Its risk reduction is what
+#            still applies while suppressing: no size ADD (size_factor is clamped
+#            to <= 1.0) and the regime-tightened %-of-margin session rail. It is
+#            NOT "a tightened trailing soft reset" — nothing reads such a signal;
+#            saying so once made a dead config key look like a safety mechanism.
+# Mid additionally arms the regime gate, which pauses trends/breakouts and not
+# chop. Both keep their configured net-exposure cap and their session SL/TP rails.
 NEVER_SUPPRESSED = ("mid", "rgrid")
 
 # Overlay-specific max drawdown (% of session margin). Independent of, and
@@ -87,6 +90,7 @@ def compute_overrides(strategy: str, signal: Signal) -> Dict[str, object]:
     ``spread_factor`` 0.75..3.0 multiplier on the quoted per-side spread.
     ``directional_bias``  only for Mid (it consumes a continuous bias).
     ``suppress_new_entries``  True -> choke NEW exposure (reduce-only posture).
+        Mid instead arms the regime gate; R-Grid is exempt (see NEVER_SUPPRESSED).
     """
     strat = str(strategy or "").lower()
     # Size: add on the favoured side only on a confident trend; trim otherwise.
@@ -268,13 +272,26 @@ def apply_overrides_to_configs(
 
     if overrides.get("suppress_new_entries"):
         strat = str(strategy or "").lower()
-        if strat in NEVER_SUPPRESSED:
-            # These two must keep trading through the regime that triggers
-            # suppression, so the overlay protects them a different way (see
-            # NEVER_SUPPRESSED). It still records the posture for telemetry and,
-            # for R-Grid, tightens the trailing soft reset instead.
-            configs["overlay_defensive"] = True
-            changed["overlay_defensive"] = True
+        if strat == "mid":
+            # Mid keeps its exposure cap and keeps QUOTING (suppression fires on
+            # chop, the regime a symmetric maker exists for) — but it still gets
+            # the regime gate, which pauses new opens on trends/breakouts and NOT
+            # on chop. main armed this for mid; an earlier pass on this branch
+            # replaced it with an ``overlay_defensive`` flag that nothing read, so
+            # Mid took ZERO defensive action on the two non-chop triggers
+            # (signal_engine: a higher-timeframe trend opposing the bias, and a
+            # cold candle cache) and kept quoting a full-size ladder into a
+            # flagged breakout.
+            configs["regime_gate_enabled"] = True
+            changed["regime_gate_enabled"] = True
+        elif strat in NEVER_SUPPRESSED:
+            # R-Grid: exempt outright. It is a momentum strategy that ADDS into
+            # trends, so arming a trend gate would pause it exactly where it is
+            # supposed to work (a product ruling). Its risk reduction comes from
+            # the overlay's other levers, which still apply: no size ADD while
+            # suppressing (size_factor is clamped to <= 1.0 above) and the
+            # regime-tightened %-of-margin session rail via rail_barriers().
+            pass
         else:
             # Reduce-only posture as an EXPLICIT flag honoured by
             # Controller.exposure_allowed_sides, plus the regime gate.

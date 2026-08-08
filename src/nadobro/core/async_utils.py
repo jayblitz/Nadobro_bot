@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import logging
 
 from src.nadobro.utils.env import env_float, env_int
 from concurrent.futures import ThreadPoolExecutor
@@ -141,19 +142,43 @@ async def run_blocking_sdk_capped(
 
 # Strong refs for fire-and-forget tasks: the event loop only holds weak
 # references, so an unreferenced task can be garbage-collected before it runs.
+logger = logging.getLogger(__name__)
+
 _background_tasks: set[asyncio.Task] = set()
 
 
-def fire_and_forget(coro) -> asyncio.Task:
+def _reap_background_task(task: asyncio.Task) -> None:
+    """Drop the strong reference and RETRIEVE the exception.
+
+    Discarding without reading ``task.exception()`` leaves a failure invisible: it
+    surfaces only as asyncio's "Task exception was never retrieved" at GC time,
+    with no logger, no counter, and no way to tell which task it was. Every
+    current caller happens to catch its own exceptions, so this is defense in
+    depth for the NEXT one — the primitive should not be a place where errors go
+    to die.
+    """
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("background task %s failed: %s", task.get_name(), exc,
+                       exc_info=exc)
+
+
+def fire_and_forget(coro, *, name: str | None = None) -> asyncio.Task:
     """Schedule ``coro`` without awaiting it, keeping a strong reference.
 
     For side work whose result nobody needs and whose latency nobody should pay
     for — e.g. the Telegram typing indicator or a callback-query ack, each a full
     round-trip that used to sit in front of every button tap.
+
+    Pass ``name`` to make a failure identifiable in the log; without it asyncio's
+    generic ``Task-N`` is all the warning can report.
     """
-    task = asyncio.get_running_loop().create_task(coro)
+    task = asyncio.get_running_loop().create_task(coro, name=name)
     _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(_reap_background_task)
     return task
 
 

@@ -438,3 +438,96 @@ def test_adversarial_transient_errors_on_open_placement():
         assert len(adapter.placed) == 5
 
     asyncio.run(body())
+
+
+def test_a_PARTIAL_profit_tier_booking_does_not_destroy_the_levels_close_fill():
+    """GRID-CLOSE-WATERMARK. ``_close_recorded`` had two incompatible meanings:
+    ``_ingest`` assigns it ABSOLUTELY as the close ORDER's cumulative-fill
+    watermark, while the booking path INCREMENTED it as a held-inventory counter.
+
+    A tier that books less than a level's ``filled_base`` leaves the level in
+    CLOSE_ORDER_PLACED (the completion branch needs >= filled_base), so
+    ``_process_level`` polls that close order again — and ``_ingest`` then
+    subtracts the tier's base from the close order's real fills. The fill is
+    under-counted or discarded entirely, its price is computed against an
+    un-advanced quote watermark (so it reports a wildly wrong price), and the
+    executor is left holding phantom inventory the venue does not have. That
+    phantom net then permanently blocks D-Grid's next phase spawn
+    (dynamic_grid._spawn_phase refuses on a non-flat net), i.e. D-Grid goes dark.
+    """
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(105))
+        inv = InventoryRepository()
+        ex = _ex(_cfg(), adapter, inv)
+        await ex.on_create()
+        lv = ex.levels[0]
+        adapter.fill_order(lv.open_order_id, price=lv.open_price)
+        await ex.on_tick()
+        held = lv.filled_base
+        assert inv.get(1, PAIR, "c").net_amount_base == held
+
+        # A tier books HALF the level — the normal case, since a slice is a
+        # fraction (default 33%) of the whole position.
+        half = held / 2
+        await ex.reduce_position(half, mid=Decimal(105))
+        adapter.fill_order(ex._book_order_id)
+        booked = await ex.reduce_position(Decimal(0), mid=Decimal(105))
+        assert booked == half
+        assert lv.state is GridLevelState.CLOSE_ORDER_PLACED, (
+            "premise: a partial booking leaves the level's close leg live"
+        )
+
+        # The level's own close leg then fills the remaining half.
+        adapter.fill_order(lv.close_order_id, amount=half)
+        await ex.on_tick()
+
+        assert inv.get(1, PAIR, "c").net_amount_base == Decimal(0), (
+            "a real close fill was discarded — inventory holds phantom base the "
+            "venue does not have, and D-Grid can never re-arm"
+        )
+        assert ex._net_base() == Decimal(0)
+        assert lv.state is GridLevelState.COMPLETE
+
+    asyncio.run(body())
+
+
+def test_the_price_of_a_close_fill_after_a_partial_booking_is_real():
+    """Same root cause, the attribution half: the booking path must not advance
+    the QUOTE watermark either, or ``_ingest`` divides the close order's full
+    quote by a shrunken base delta and bridges the fill at a price far from what
+    the venue actually paid."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(105))
+        rec = []
+
+        class _Spy:
+            def record(self, cid, pair, side, amount_base, price, fee_quote,
+                       order_id=None, timestamp=None, *, realized_pnl=None,
+                       is_taker=False):
+                rec.append((side, Decimal(str(amount_base)), Decimal(str(price))))
+
+            def link_placement(self, *a):
+                pass
+
+        ex = _ex(_cfg(), adapter, InventoryRepository())
+        ex.trade_recorder = _Spy()
+        await ex.on_create()
+        lv = ex.levels[0]
+        adapter.fill_order(lv.open_order_id, price=lv.open_price)
+        await ex.on_tick()
+        half = lv.filled_base / 2
+
+        await ex.reduce_position(half, mid=Decimal(105))
+        adapter.fill_order(ex._book_order_id)
+        await ex.reduce_position(Decimal(0), mid=Decimal(105))
+        adapter.fill_order(lv.close_order_id, amount=half, price=lv.close_price)
+        await ex.on_tick()
+
+        closes = [r for r in rec if r[0] is TradeType.SELL]
+        assert closes, "no close fill was recorded at all"
+        last = closes[-1]
+        assert abs(last[2] - lv.close_price) < Decimal("0.01"), (
+            f"close fill bridged at {last[2]} but the venue paid {lv.close_price}"
+        )
+
+    asyncio.run(body())

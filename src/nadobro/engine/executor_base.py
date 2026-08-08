@@ -187,6 +187,12 @@ class Executor(abc.ABC):
            This is the original behaviour and stays the conservative default.
         """
         cfg = getattr(self, "config", None)
+        # PositionExecutorConfig (Delta Neutral, desk) holds neither field itself —
+        # they live on a NESTED ``order_config``. Without this hop, DN's MARKET
+        # legs fell through every tier and recorded as maker on both legs of every
+        # cycle.
+        if cfg is not None and not hasattr(cfg, "execution_strategy"):
+            cfg = getattr(cfg, "order_config", cfg)
         try:
             from src.nadobro.engine.types import ExecutionStrategy
 

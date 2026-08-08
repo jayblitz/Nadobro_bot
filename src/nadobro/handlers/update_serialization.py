@@ -79,7 +79,7 @@ def with_callback_ack(
     async def _wrapped(update: Update, context: CallbackContext):
         query = update.callback_query
         if query is not None and (query.data or "") not in _NO_PREACK_CALLBACK_DATA:
-            fire_and_forget(_safe_answer(query))
+            fire_and_forget(_safe_answer(query), name="callback-ack")
         return await handler(update, context)
 
     return _wrapped

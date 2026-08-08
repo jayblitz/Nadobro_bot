@@ -278,3 +278,45 @@ def test_a_resting_limit_order_is_not_promoted_to_taker():
         )
 
     assert OrderExecutor._fill_was_taker(_Rested()) is False
+
+
+def test_a_nested_position_executor_config_still_reports_taker():
+    """Delta Neutral's legs are MARKET, but ``PositionExecutorConfig`` holds neither
+    ``execution_strategy`` nor ``crosses_book`` — they live on a NESTED
+    ``order_config``. Without descending into it, every DN leg of every cycle fell
+    through all three tiers and recorded as MAKER."""
+    class _Nested:
+        order = None
+
+        def __init__(self, strategy):
+            inner = type("Inner", (), {"execution_strategy": strategy,
+                                       "crosses_book": False})()
+            # No execution_strategy on the OUTER config — the DN/desk shape.
+            self.config = type("Outer", (), {"order_config": inner})()
+
+    assert OrderExecutor._fill_was_taker(_Nested(ExecutionStrategy.MARKET)) is True
+    assert OrderExecutor._fill_was_taker(_Nested(ExecutionStrategy.LIMIT_MAKER)) is False
+
+
+def test_a_vol_close_leg_is_never_blocked_by_a_size_cap():
+    """VOL-EXIT-CAP. Prod session 104 stranded spot: the venue lot-rounds a buy fill
+    UP, so a $100 session held $101.01 and the sell's $100 cap rejected it 1.4s
+    after the fill. That was patched by padding the cap; the reduce-only exemption
+    is the actual fix, and vol's close legs now claim it."""
+    from decimal import Decimal as D
+
+    from src.nadobro.engine.risk import ExecutorRequest, RiskEngine
+    from src.nadobro.engine.types import RiskLimits, RiskState
+
+    eng = RiskEngine(RiskLimits(max_single_order_quote=D(100),
+                                max_position_size_quote=D(100)))
+    # The exact shape volume_bot._spawn_order now builds for a CLOSE leg.
+    closing = ExecutorRequest(D("101.01"), reduce_only=True,
+                              position_action=PositionAction.CLOSE)
+    ok, reason = eng.pre_executor_check("vol", closing, RiskState())
+    assert ok and reason is None, f"the exit was refused: {reason}"
+
+    # An OPENING leg of the same size is still capped.
+    opening = ExecutorRequest(D("101.01"), position_action=PositionAction.OPEN)
+    ok, reason = eng.pre_executor_check("vol", opening, RiskState())
+    assert not ok and reason == "max_single_order_quote"

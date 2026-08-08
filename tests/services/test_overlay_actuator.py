@@ -69,17 +69,24 @@ def test_chop_suppresses_new_exposure():
 
 def test_chop_suppress_leaves_mid_quoting_with_its_cap_intact():
     """Suppression fires on CHOP — exactly the regime a symmetric maker exists to
-    quote. Mid keeps its configured cap AND keeps quoting: it is not choked and
-    not gated, only flagged defensive."""
+    quote. Mid keeps its configured cap AND keeps quoting: it is not choked.
+
+    It IS still gated, though. This test used to assert ``regime_gate_enabled not
+    in cfg`` plus an ``overlay_defensive`` flag; the self-audit (2026-08-08) showed
+    that flag had no readers anywhere, so Mid's only automatic defensive action had
+    been deleted rather than replaced. The gate pauses trends/breakouts and NOT
+    chop, so arming it costs Mid nothing in the regime this exemption is about, and
+    it restores the protection on the other two triggers (a higher-timeframe trend
+    opposing the bias, and a cold candle cache)."""
     sig = Signal(bias=0.05, regime="chop", entry_ok=False, scale=0.0, spread_mult=1.0, confidence=0.2)
     ov = oa.compute_overrides("mid", sig)
     assert ov["suppress_new_entries"] is True
     cfg = {"order_amount_quote": Decimal("400"), "max_net_exposure_pct": 30.0}
     oa.apply_overrides_to_configs("mid", cfg, ov)
     assert cfg["max_net_exposure_pct"] == 30.0         # configured cap survives
-    assert "suppress_new_entries" not in cfg
-    assert "regime_gate_enabled" not in cfg
-    assert cfg["overlay_defensive"] is True
+    assert "suppress_new_entries" not in cfg           # never choked
+    assert cfg["regime_gate_enabled"] is True          # but still gated
+    assert "overlay_defensive" not in cfg              # no write-only "safety" key
 
 
 def test_suppress_never_also_adds_size():
@@ -301,9 +308,13 @@ def test_the_ladder_family_is_choked_reduce_only_when_suppressed():
 
 def test_mid_and_rgrid_are_never_stood_down_by_the_overlay():
     """Suppression fires on CHOP. Mid exists to quote chop; R-Grid must keep
-    following a move and must not be abandoned mid-position — pausing a taker with
-    an open book leaves nobody managing the exit. Both are protected instead
-    (R-Grid arms its trailing exit early), so neither is gated or choked."""
+    following a move and must not be abandoned mid-position — pausing it with an
+    open book leaves nobody managing the exit. Neither is CHOKED (reduce-only).
+
+    They differ on gating: Mid is gated (the gate pauses trends/breakouts, not
+    chop), R-Grid is not (it adds INTO trends by design). Their shared protection
+    while suppressing is what the overlay still applies — no size ADD, and the
+    regime-tightened %-of-margin session rail."""
     from src.nadobro.llm.signal_engine import Signal
     from src.nadobro.strategy.overlay_actuator import (
         NEVER_SUPPRESSED, apply_overrides_to_configs, compute_overrides,
@@ -316,8 +327,12 @@ def test_mid_and_rgrid_are_never_stood_down_by_the_overlay():
         apply_overrides_to_configs(strategy, cfg, overrides)
         assert float(cfg["max_net_exposure_pct"]) == 0.30
         assert "suppress_new_entries" not in cfg, f"{strategy} was choked"
-        assert "regime_gate_enabled" not in cfg, f"{strategy} was gated"
-        assert cfg["overlay_defensive"] is True, "the posture is still recorded"
+        assert "overlay_defensive" not in cfg, "write-only key must be gone"
+        if strategy == "rgrid":
+            assert "regime_gate_enabled" not in cfg, "R-Grid must not be gated"
+        else:
+            assert cfg["regime_gate_enabled"] is True, "Mid keeps its gate"
+        assert float(overrides["size_factor"]) <= 1.0, "no size ADD while suppressing"
 
 
 def test_the_overlay_cannot_grow_the_rgrid_step_past_its_stop_budget():
@@ -338,3 +353,33 @@ def test_the_overlay_cannot_grow_the_rgrid_step_past_its_stop_budget():
     # pinned even if the call site moves.
     step_cap = Decimal(str(cfg["step_capped_quote"]))
     assert min(grown, step_cap) == Decimal("307")
+
+
+def test_mid_gets_the_regime_gate_under_suppression_and_rgrid_does_not():
+    """OVERLAY-MID-GATE (self-audit 2026-08-08). Exempting mid from the reduce-only
+    posture also dropped the ``regime_gate_enabled`` arming main did for it, and put
+    an ``overlay_defensive`` key in its place that NO code read — so Mid took zero
+    defensive action on the two non-chop suppression triggers and kept quoting a
+    full-size ladder into a flagged breakout. R-Grid must still NOT be gated: it
+    adds into trends by design."""
+    from src.nadobro.strategy.overlay_actuator import apply_overrides_to_configs
+
+    for strategy, expect_gate in (("mid", True), ("rgrid", False), ("grid", True)):
+        configs: dict = {}
+        changed = apply_overrides_to_configs(
+            strategy, configs, {"suppress_new_entries": True},
+        )
+        assert bool(configs.get("regime_gate_enabled")) is expect_gate, (
+            f"{strategy}: regime_gate_enabled={configs.get('regime_gate_enabled')}, "
+            f"expected {expect_gate}"
+        )
+        # Never encode "stand down" as a zeroed exposure cap (SUPPRESS-CAP-ZERO):
+        # both guards read a cap of 0 as "cap inactive".
+        assert configs.get("max_net_exposure_pct") != 0.0
+        # And no write-only flag masquerading as a safety mechanism.
+        assert "overlay_defensive" not in configs
+        assert "overlay_defensive" not in changed
+    # R-Grid is exempt from the gate but must still be flagged reduce-only nowhere:
+    rg: dict = {}
+    apply_overrides_to_configs("rgrid", rg, {"suppress_new_entries": True})
+    assert not rg.get("suppress_new_entries"), "R-Grid must never be suppressed"

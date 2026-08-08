@@ -497,8 +497,21 @@ class VolumeBotController(Controller):
             adapter=self.adapter,
             inventory=self.inventory,
         )
+        # A risk LIMIT must never block risk REDUCTION. Without this, prod session
+        # 104 stranded spot: the venue lot-rounds a buy fill UP, so a $100 session
+        # held $101.01, and the sell's $100 cap rejected it 1.4s after the fill
+        # (see the comment at strategy/engine_runtime.py's vol risk-limits block).
+        # That was patched by padding the CAP with headroom; the exemption is the
+        # actual fix, and it is the same one R-Grid's reducing leg already uses.
+        # Safe on spot even though the adapter STRIPS reduce_only there (the venue
+        # rejects it, error_code 5000): the exit is still bounded, by never_grow
+        # plus the adapter's clamp down to the wallet balance.
+        _closing = position_action is PositionAction.CLOSE
         ok = await self.spawn_executor(
-            ex, ExecutorRequest(order_amount_quote=amount_base * sizing_price)
+            ex, ExecutorRequest(
+                order_amount_quote=amount_base * sizing_price,
+                reduce_only=_closing, position_action=position_action,
+            )
         )
         if ok and ex.order is not None:
             self.last_order_digest = ex.order.id

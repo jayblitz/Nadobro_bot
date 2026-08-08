@@ -280,7 +280,7 @@ async def advise(
         try:
             from src.nadobro.core.async_utils import fire_and_forget
 
-            fire_and_forget(_refresh())
+            fire_and_forget(_refresh(), name=f"signal-advisor-refresh:{network}:{product}")
         except Exception:  # noqa: BLE001 - no loop (sync caller/tests): skip the refresh
             _INFLIGHT.discard(key)
     return signal, None

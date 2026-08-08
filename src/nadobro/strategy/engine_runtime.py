@@ -1529,7 +1529,18 @@ def map_strategy_config(
         # The user's allocated MARGIN (= notional), so the controller measures
         # the tier % against the SAME basis as the session TP rail — NOT the
         # deployed notional (margin x leverage) that margin_quote carries.
-        cfg["tp_margin_basis"] = Decimal(str(notional))
+        # The tier ladder is anchored to the user's TP, so its denominator MUST be
+        # the margin the session rail measures against — not the deployment basis
+        # ``notional``, which resolves cycle-first while the rail resolves
+        # notional-first. With cycle_notional_usd=250 and notional_usd=100 the
+        # tiers demanded $1/$2/$3 of uPnL while the rail took profit at $1.20 (the
+        # ladder dead above rung one); with cycle 50 they fired at half the user's
+        # TP. Same hazard the R-Grid step cap already fixed above.
+        from src.nadobro.strategy.strategy_registry import (
+            session_margin_usd as _rail_margin_usd,
+        )
+
+        cfg["tp_margin_basis"] = Decimal(str(_rail_margin_usd(settings) or notional))
         # Confirm-ticks debounce a flip: wait an extra tick to avoid whipsaw.
         cfg["dgrid_flip_confirm_ticks"] = int(max(1, _f(settings, "dgrid_flip_confirm_ticks", 2)))
         # Trend-capture redesign (2026-06): as a run goes in profit, ratchet a

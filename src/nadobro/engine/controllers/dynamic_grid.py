@@ -638,6 +638,21 @@ class DynamicGridController(Controller):
             # fresh position starts from a clean ladder instead of re-quoting a
             # close for a position that no longer exists.
             if self._book_slice is not None:
+                # Release the resting order FIRST. Dropping the slice without it
+                # left an unmanaged reduce-only maker on the book: only
+                # reduce_position drives that order, and with no slice nothing
+                # calls it again — so on a recycling grid it would sit at a stale
+                # price and later close inventory the fresh levels are counting on.
+                for ex in self.my_executors(active_only=True):
+                    release = getattr(ex, "release_book_order", None)
+                    if release is not None:
+                        try:
+                            await release()
+                        except Exception:  # noqa: BLE001 - best-effort teardown
+                            logger.warning(
+                                "dgrid %s: releasing the profit-tier order failed",
+                                self.id, exc_info=True,
+                            )
                 self._booked_tiers |= self._book_slice.tiers
                 self._book_slice = None
             return
@@ -657,8 +672,16 @@ class DynamicGridController(Controller):
         fresh = [i for i in crossed if i not in slice_.tiers]
         if fresh:
             frac = min(1.0, self.tp_fraction * len(fresh))
-            slice_.tiers.update(fresh)
-            slice_.target += self._quantize_base(abs(net) * _dec(frac))
+            grew = self._quantize_base(abs(net) * _dec(frac))
+            # A slice that quantizes to ZERO (position smaller than one lot per
+            # tier) must NOT claim the tier: it would sit in slice_.tiers forever,
+            # excluded from `fresh` and never worked, and its share of the
+            # scale-out would be silently lost — the later tier's `frac` counts
+            # only ITSELF. Leaving it in `crossed` lets it merge into the next,
+            # larger slice, which is what the merge was for.
+            if grew > 0:
+                slice_.tiers.update(fresh)
+                slice_.target += grew
         # Never work more than is actually held (the position shrinks as we fill).
         slice_.target = min(slice_.target, slice_.done + abs(net))
         self._book_slice = slice_

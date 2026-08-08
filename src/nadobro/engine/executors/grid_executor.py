@@ -80,6 +80,15 @@ class GridLevel:
     _close_recorded: Decimal = Decimal(0)
     _close_quote_recorded: Decimal = Decimal(0)
     _close_fee_recorded: Decimal = Decimal(0)
+    # Base of this level's inventory closed by an order that is NOT its own close
+    # leg — a profit-tier booking or the stop-out flatten. GRID-CLOSE-WATERMARK:
+    # this used to be added into ``_close_recorded``, which ``_ingest`` assigns
+    # ABSOLUTELY as the close ORDER's cumulative-fill watermark. Mixing a counter
+    # into a watermark made ``_ingest`` subtract externally-closed base from the
+    # close order's real fills: the fill was under-counted or dropped, its price
+    # was divided by a shrunken delta, and the executor held phantom inventory
+    # that permanently blocked D-Grid's next phase spawn.
+    _close_booked_base: Decimal = Decimal(0)
     filled_base: Decimal = Decimal(0)
     filled_quote: Decimal = Decimal(0)
 
@@ -233,7 +242,10 @@ class GridExecutor(Executor):
         self.orders_placed += 1
 
     async def _place_close(self, level: GridLevel) -> None:
-        await self._place_close_remaining(level, level.filled_base - level._close_recorded)
+        await self._place_close_remaining(
+            level,
+            level.filled_base - level._close_recorded - level._close_booked_base,
+        )
 
     async def _place_close_remaining(self, level: GridLevel, base_amount: Decimal) -> None:
         if base_amount <= 0:
@@ -419,20 +431,74 @@ class GridExecutor(Executor):
         await self._maybe_place_opens()
 
     def _unclosed_base(self) -> Decimal:
-        held = sum((lv.filled_base - lv._close_recorded for lv in self.levels), Decimal(0))
+        held = sum(
+            (lv.filled_base - lv._close_recorded - lv._close_booked_base
+             for lv in self.levels),
+            Decimal(0),
+        )
         return max(Decimal(0), held)
 
     def _book_maker_price(self, mid: Decimal) -> Decimal:
-        """A price on the maker side of ``mid`` for the profit-tier close.
+        """A price on the maker side of ``mid`` for the profit-tier close, never
+        worse than the average entry.
 
         Strictly beyond mid, so a post-only order can never be rejected as
         crossing (error_code 2008): above for a SELL close, below for a BUY. The
         real adapter additionally rounds post-only AWAY from the book when it
         aligns to the tick, so alignment cannot turn this into a taker either.
+
+        PROFIT-TIER FLOOR: the re-quote follows the fresh mid every
+        ``_BOOK_REQUOTE_SECONDS``, so on a reversal it would chase the market DOWN
+        and eventually fill below the average entry — booking a LOSS on the tier
+        that armed because the run was in PROFIT. The MARKET version could not do
+        that: it crossed at the tier price and banked it. So the price is floored
+        at the average entry, which keeps the whole point of a scale-out intact.
+        The floor can only push the quote FURTHER from mid, so it is still a maker
+        by construction; if price never comes back the tier simply does not book,
+        which is the honest maker-only outcome, and the session rail is the
+        backstop.
         """
+        avg = self._avg_entry()
         if self.close_side is TradeType.SELL:
-            return mid * (Decimal(1) + _BOOK_MAKER_OFFSET)
-        return mid * (Decimal(1) - _BOOK_MAKER_OFFSET)
+            price = mid * (Decimal(1) + _BOOK_MAKER_OFFSET)
+            if avg is not None and avg > 0:
+                price = max(price, avg * (Decimal(1) + _BOOK_MAKER_OFFSET))
+            return price
+        price = mid * (Decimal(1) - _BOOK_MAKER_OFFSET)
+        if avg is not None and avg > 0:
+            price = min(price, avg * (Decimal(1) - _BOOK_MAKER_OFFSET))
+        return price
+
+    async def release_book_order(self) -> Decimal:
+        """Cancel any resting profit-tier close, absorbing a last fill first.
+
+        For the controller to call when its slice is finished or moot: the order
+        hangs off this executor and only ``reduce_position`` drives it, so a
+        dropped slice would otherwise leave an unmanaged reduce-only maker on the
+        book — closing position the next phase is counting on, at a price derived
+        from a stale mid. Returns any base that filled in the race.
+        """
+        if self._book_order_id is None:
+            return Decimal(0)
+        oid = self._book_order_id
+        booked = Decimal(0)
+        try:
+            await self._guard(lambda: self.adapter.cancel_order(oid),
+                              label="grid_book_release")
+            self.orders_cancelled += 1
+        except Exception as exc:  # noqa: BLE001 - cancel is best-effort
+            logger.warning("grid %s: profit-tier release cancel failed for %s: %s",
+                           self.id, oid, exc)
+            return booked          # may still be live — keep managing it
+        try:
+            refreshed = await self._guard(lambda: self.adapter.order_status(oid),
+                                          label="grid_book_release_status")
+            booked += await self._ingest_book(refreshed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("grid %s: profit-tier release re-poll failed for %s: %s",
+                           self.id, oid, exc)
+        self._clear_book_order()
+        return booked
 
     def _clear_book_order(self) -> None:
         self._book_order_id = None
@@ -604,6 +670,32 @@ class GridExecutor(Executor):
             self._clear_book_order()
         return booked
 
+    async def _maybe_complete_level(self, lv: GridLevel) -> bool:
+        """Complete a level whose inventory is fully closed, cancelling any close
+        leg still resting for base that is already gone.
+
+        Needed because a level can be closed by TWO orders — its own close leg and
+        an external booking (profit tier / stop-out flatten) — and neither alone
+        reports "FILLED" for the whole level. Without this, a level closed half by
+        a tier and half by a partial close-leg fill stays CLOSE_ORDER_PLACED with
+        an oversized order still on the book: reduce-only stops it over-closing,
+        but it is a stale order against inventory the executor no longer holds.
+        """
+        if lv._close_recorded + lv._close_booked_base < lv.filled_base:
+            return False
+        if lv.close_order_id is not None:
+            cid = lv.close_order_id
+            try:
+                await self._guard(lambda: self.adapter.cancel_order(cid),
+                                  label="grid_close_complete_cancel")
+                self.orders_cancelled += 1
+            except Exception as exc:  # noqa: BLE001 - cancel is best-effort
+                logger.warning("grid %s: completing level cancel failed for %s: %s",
+                               self.id, cid, exc)
+            lv.close_order_id = None
+        lv.state = GridLevelState.COMPLETE
+        return True
+
     async def _advance_close_accounting(self, filled: Decimal) -> None:
         """Attribute ``filled`` base of closing volume across the levels holding
         inventory, so resting close legs don't try to re-close it."""
@@ -611,22 +703,13 @@ class GridExecutor(Executor):
         for lv in self.levels:
             if remaining <= 0:
                 break
-            lv_held = lv.filled_base - lv._close_recorded
+            lv_held = lv.filled_base - lv._close_recorded - lv._close_booked_base
             if lv_held <= 0:
                 continue
             take = min(lv_held, remaining)
-            lv._close_recorded += take
+            lv._close_booked_base += take
             remaining -= take
-            if lv._close_recorded >= lv.filled_base and lv.state is GridLevelState.CLOSE_ORDER_PLACED:
-                if lv.close_order_id is not None:
-                    cid = lv.close_order_id
-                    try:
-                        await self._guard(lambda: self.adapter.cancel_order(cid), label="grid_book_cancel_close")
-                        self.orders_cancelled += 1
-                    except Exception as exc:  # noqa: BLE001 - cancel is best-effort
-                        logger.warning("grid %s: book-reduce close cancel failed for %s: %s", self.id, cid, exc)
-                    lv.close_order_id = None
-                lv.state = GridLevelState.COMPLETE
+            await self._maybe_complete_level(lv)
 
     async def on_tick(self) -> None:
         if self.is_terminated:
@@ -774,11 +857,16 @@ class GridExecutor(Executor):
                 level.state = GridLevelState.COMPLETE
                 self.orders_filled += 1
                 return
+            # A tier may already have closed the rest of this level, so the level
+            # can be whole even when THIS order is only partially filled.
+            if await self._maybe_complete_level(level):
+                return
             if order.state in (OrderState.CANCELLED, OrderState.REJECTED):
                 # BUG-GR-2 fix: re-place the close leg for the remaining base
                 # if any. If the level is fully closed via partials, complete it.
                 level.close_order_id = None
-                remaining = level.filled_base - level._close_recorded
+                remaining = (level.filled_base - level._close_recorded
+                             - level._close_booked_base)
                 if remaining <= 0:
                     level.state = GridLevelState.COMPLETE
                 else:
@@ -819,7 +907,10 @@ class GridExecutor(Executor):
 
     def _net_base(self) -> Decimal:
         opened = sum((lv.filled_base for lv in self.levels), Decimal(0))
-        closed = sum((lv._close_recorded for lv in self.levels), Decimal(0))
+        closed = sum(
+            (lv._close_recorded + lv._close_booked_base for lv in self.levels),
+            Decimal(0),
+        )
         return opened - closed
 
     async def _stop_out(self, close_type: CloseType) -> None:
@@ -889,13 +980,15 @@ class GridExecutor(Executor):
                 for level in self.levels:
                     if remaining_flat <= 0:
                         break
-                    held = level.filled_base - level._close_recorded
+                    held = (level.filled_base - level._close_recorded
+                            - level._close_booked_base)
                     if held <= 0:
                         continue
                     take = min(held, remaining_flat)
-                    level._close_recorded += take
+                    level._close_booked_base += take
                     remaining_flat -= take
-                    if level._close_recorded >= level.filled_base:
+                    if (level._close_recorded + level._close_booked_base
+                            >= level.filled_base):
                         level.state = GridLevelState.COMPLETE
                         level.close_order_id = None
             remaining = self._net_base()

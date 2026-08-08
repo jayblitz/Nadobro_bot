@@ -356,3 +356,119 @@ def test_dgrid_tp_tiers_receive_a_percent_not_a_fraction():
     tiers, basis = c._tp_tier_ladder()
     assert max(tiers) == pytest.approx(1.2), tiers
     assert basis == Decimal(100)
+
+
+# ==========================================================================
+# Self-audit 2026-08-08 (pre-merge, whole branch) — [VERIFIED] findings that
+# need a PRODUCT decision, recorded as strict xfails per the triage protocol
+# rather than fixed silently. Each must be either fixed (delete the marker in
+# the same PR) or consciously accepted before this ladder changes again.
+# ==========================================================================
+@pytest.mark.xfail(strict=True, reason="RGRID-STEP-EXIT-FEE: the stop-budget step "
+                   "cap prices the round trip at ONE step, but the trailing stop "
+                   "crosses the WHOLE pyramided position, so the real exit fee can "
+                   "be several times what the cap budgeted")
+def test_the_rgrid_step_cap_budgets_the_exit_it_will_actually_pay():
+    """R-Grid pyramids: each break adds a step, so exposure grows to
+    ``levels * step`` (bounded by the net-exposure cap). The trailing stop then
+    crosses ``abs(net)`` — the whole pyramid — while
+    ``rgrid_sizing.resolve_step_quote`` bounds the budget against
+    ``taker_round_trip_cost(step)``, a SINGLE step.
+
+    At the shipped defaults on a 50x pair ($100 margin, 4 levels, 0.8% SL) the cap
+    certifies "~3 round trips fit" while one exit on the full pyramid eats a large
+    share of the whole $0.80 budget. The user sees R-Grid stop out on its own exit.
+    """
+    from src.nadobro.quant.rgrid_sizing import (
+        TAKER_ROUND_TRIP_RATE, resolve_step_quote,
+    )
+
+    deployed, levels = Decimal(5000), 4          # $100 at 50x
+    plan = resolve_step_quote(
+        deployed_quote=deployed, levels=levels,
+        stop_budget_usd=Decimal("0.80"),          # 0.8% of $100
+    )
+    pyramid = plan.step * Decimal(levels)
+    exit_fee = pyramid * (Decimal(str(TAKER_ROUND_TRIP_RATE)) / Decimal(2))
+    assert exit_fee <= plan.stop_budget_usd / Decimal(2), (
+        f"one exit on the {pyramid} pyramid costs {exit_fee}, over half the "
+        f"{plan.stop_budget_usd} stop budget the cap sized against one "
+        f"{plan.step} step"
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="RGRID-STEP-PRICE-BOUND: the step cap "
+                   "bounds FEES only; nothing bounds the pyramided position "
+                   "against the stop budget's adverse-PRICE tolerance, so at high "
+                   "leverage the session rail fires before R-Grid's own exit "
+                   "geometry can become postable")
+def test_the_rgrid_pyramid_can_move_a_band_before_the_rail_fires():
+    """R-Grid's own exit needs a full ``band`` pullback to become postable. If the
+    pyramid is large enough that ``band`` of adverse move exceeds the stop budget,
+    the rail always wins and the strategy can never exit on its own terms — "the
+    user never sees a losing trade, just a strategy that keeps stopping"."""
+    from src.nadobro.quant.rgrid_sizing import (
+        TAKER_ROUND_TRIP_RATE, resolve_step_quote,
+    )
+
+    band, budget = Decimal("0.001"), Decimal("0.80")     # 10bp band, $0.80 stop
+    plan = resolve_step_quote(deployed_quote=Decimal(5000), levels=4,
+                              stop_budget_usd=budget)
+    pyramid = plan.step * Decimal(4)
+    loss_at_one_band = pyramid * (band + Decimal(str(TAKER_ROUND_TRIP_RATE)))
+    assert loss_at_one_band <= budget, (
+        f"a single band of adverse move on the {pyramid} pyramid loses "
+        f"{loss_at_one_band}, past the {budget} rail — the exit leg can never "
+        f"become postable first"
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="DGRID-TP-DISARM-PHANTOM: an explicitly "
+                   "disarmed TP is replaced by a 0.6 default, so a tier ladder "
+                   "arms at [0.2, 0.4, 0.6]% of margin for a user who chose to "
+                   "let the trend run")
+def test_a_disarmed_dgrid_tp_does_not_arm_a_phantom_tier_ladder():
+    """``map_strategy_config`` substitutes ``_tp_pct = _f(settings, "tp_pct", 0.6)``
+    whenever the strategy's own key resolves to <= 0. For dgrid the key is
+    ``rgrid_take_profit_pct``, so an explicit 0 (user disarmed TP) becomes 0.6 and
+    the tier ladder scales out at a fifth of a percent of margin — while the rail's
+    TP stays disarmed. It also makes dynamic_grid's documented "no TP set keeps the
+    legacy tiers" branch unreachable from the mapper."""
+    cfg = map_strategy_config(
+        "dgrid",
+        {"notional_usd": 100.0, "rgrid_take_profit_pct": 0.0,
+         "rgrid_stop_loss_pct": 0.8},
+        MID, product=PRODUCT,
+    )
+    rail_sl, rail_tp = effective_sl_tp_pct(
+        "dgrid", {"rgrid_take_profit_pct": 0.0, "rgrid_stop_loss_pct": 0.8})
+    assert rail_tp == 0.0, "premise: the user's TP is disarmed"
+    assert float(cfg.get("tp_pct") or 0) == 0.0, (
+        f"the rail is disarmed but the tier ladder got tp_pct="
+        f"{cfg.get('tp_pct')}, arming a scale-out the user switched off"
+    )
+
+
+def test_the_dgrid_tier_denominator_is_the_margin_the_rail_measures():
+    """DGRID-TIER-BASIS. The tier ladder is anchored to the user's TP, so its
+    denominator must be the rail's margin. It used to be the DEPLOYMENT basis,
+    which resolves cycle-first while the rail resolves notional-first: with
+    cycle 250 / margin 100 the tiers demanded $1/$2/$3 while the rail took profit
+    at $1.20 (ladder dead above rung one); with cycle 50 they fired at HALF the
+    user's TP. Same hazard the R-Grid step cap already fixed."""
+    from src.nadobro.trading.live_session import _resolve_margin
+
+    for conf in (
+        {"notional_usd": 100.0, "rgrid_take_profit_pct": 1.2},
+        {"notional_usd": 100.0, "cycle_notional_usd": 250.0,
+         "rgrid_take_profit_pct": 1.2},
+        {"notional_usd": 100.0, "cycle_notional_usd": 50.0,
+         "rgrid_take_profit_pct": 1.2},
+    ):
+        cfg = map_strategy_config("dgrid", conf, MID, product=PRODUCT)
+        basis = float(cfg["tp_margin_basis"])
+        rail = float(_resolve_margin(conf, None) or 0)
+        assert basis == rail, (
+            f"tier basis {basis} != rail margin {rail} for {conf} — the scale-out "
+            f"and the stop measure the same percent against different dollars"
+        )

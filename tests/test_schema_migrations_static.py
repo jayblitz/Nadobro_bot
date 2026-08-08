@@ -140,3 +140,61 @@ def test_signal_outcomes_migration_covers_startup_ddl_and_allowlist():
     ):
         assert index in sql, index
         assert index in ddl, index
+
+
+def test_signal_outcomes_ddl_agrees_across_all_THREE_places():
+    """migrations/0019, db.py's startup DDL, and the insert allowlist must carry
+    the same columns.
+
+    ``insert_signal_outcome``'s own docstring says "a new column means editing the
+    migration, db.py's startup DDL, AND this list" — three hand-maintained copies
+    with nothing enforcing agreement. A column added to the DDL but missed in the
+    allowlist is silently dropped on write (the filter ignores unknown keys), so
+    the grading ledger would just be missing data with no error anywhere.
+    """
+    import re
+
+    sql = Path("src/nadobro/migrations/0019_signal_outcomes.sql").read_text()
+    startup = Path("src/nadobro/db.py").read_text()
+    dbmod = Path("src/nadobro/models/database.py").read_text()
+
+    # Columns declared in the migration's CREATE TABLE body.
+    body = sql.split("CREATE TABLE IF NOT EXISTS signal_outcomes", 1)[1]
+    # Split on a paren at the START of a line: a column comment in this migration
+    # contains "down <= 0); MFE/MAE", and splitting on a bare ");" truncated the
+    # body there — silently dropping half the columns from the comparison.
+    body = body.split("\n);", 1)[0]
+    declared = {
+        m.group(1) for m in re.finditer(r"^ {2}([a-z_]+)[ \t]+[A-Z]", body, re.M)
+    }
+    assert "signal_id" in declared and "horizon" in declared, (
+        f"parser found no columns — retune this test: {sorted(declared)}"
+    )
+
+    # The startup DDL must create the same table with the same columns.
+    assert "CREATE TABLE IF NOT EXISTS signal_outcomes" in startup, (
+        "db.py's init_db does not create signal_outcomes — the migration file "
+        "alone does not run at boot in this codebase"
+    )
+    start_body = startup.split("CREATE TABLE IF NOT EXISTS signal_outcomes", 1)[1]
+    start_body = start_body.split(");", 1)[0]      # no such comment in db.py's DDL
+    for col in sorted(declared):
+        assert col in start_body, (
+            f"column {col!r} is in migrations/0019 but not in db.py's startup DDL"
+        )
+
+    # Every writable column must be in insert_signal_outcome's allowlist.
+    allow = dbmod.split("def insert_signal_outcome", 1)[1].split("payload =", 1)[0]
+    generated = {"id", "graded_at"}          # BIGSERIAL / DEFAULT now()
+    for col in sorted(declared - generated):
+        assert f'"{col}"' in allow, (
+            f"column {col!r} exists in the schema but is missing from "
+            f"insert_signal_outcome's allowlist — writes to it are silently dropped"
+        )
+
+    # And the reverse: nothing in the allowlist that the table cannot store.
+    for col in re.findall(r'"([a-z_]+)"', allow):
+        assert col in declared, (
+            f"insert_signal_outcome allows {col!r}, which is not a "
+            f"signal_outcomes column — the INSERT would raise at runtime"
+        )
