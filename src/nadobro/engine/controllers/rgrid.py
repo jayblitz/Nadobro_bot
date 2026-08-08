@@ -144,6 +144,12 @@ class RGridController(MarketMakingController):
         # blank. The runtime injects ``seed_fills`` — this session's OWN recorded
         # trades — so the anchor survives a rebuild and never sees another
         # user/session/product.
+        # Consecutive refused exits, and which legs have a LIVE (this-process) fill.
+        # Both exist because a REBUILD is not a fresh start: the controller can come
+        # back holding a position, with an exposure window seeded from the whole
+        # session's fills.
+        self._exit_failures = 0
+        self._live_fill_legs: set[str] = set()
         self._seed_from_history(self.cfg("seed_fills", None))
 
     # -- exposure window -----------------------------------------------------
@@ -211,8 +217,10 @@ class RGridController(MarketMakingController):
             side = getattr(getattr(ex, "config", None), "side", None)
             if side is TradeType.BUY:
                 self._leg_fills[BUY].append((px, base))
+                self._live_fill_legs.add(BUY)
             elif side is TradeType.SELL:
                 self._leg_fills[SELL].append((px, base))
+                self._live_fill_legs.add(SELL)
         if len(self._seen_filled) > 200:
             live = {e.id for e in self.my_executors(active_only=False)}
             self._seen_filled &= live
@@ -261,6 +269,10 @@ class RGridController(MarketMakingController):
         anchor. Also disarms the trail — it belonged to that position."""
         for leg in self._leg_fills.values():
             leg.clear()
+        # The window is gone, so the evidence that it was grounded in a live
+        # position goes with it: the next position must earn the crossing exit
+        # again with its own fill.
+        self._live_fill_legs.clear()
         self._anchor = mid
         self._trail_peak = None
         self._trail_armed = False
@@ -466,7 +478,20 @@ class RGridController(MarketMakingController):
                 position_action=cfg.position_action,
             )
         ):
+            self._exit_failures += 1
+            log = (logger.error if self._exit_failures >= _MAX_CONSECUTIVE_EXIT_FAILURES
+                   else logger.warning)
+            log(
+                "rgrid exit REFUSED (%s consecutive): %s of %s still open on %s and "
+                "no exit order is working — the risk engine or the kill switch "
+                "declined it (reduce-only is exempt from the SIZE caps, but not "
+                "from max_open_executors or the kill switch). The session rail is "
+                "the only stop left. (user=%s controller=%s)",
+                self._exit_failures, "long" if net > 0 else "short", abs(net),
+                self.trading_pair, self.user_id, self.id,
+            )
             return False
+        self._exit_failures = 0
         self._stop_id = ex.id
         logger.info(
             "rgrid crossing exit (%s): mid %s reached the level %s "
@@ -587,7 +612,7 @@ class RGridController(MarketMakingController):
         # has no deadline and earns the spread, which is the whole point of the
         # geometry (a bid parked above the anchor only becomes fillable once price
         # has risen past it, so the fill IS the momentum signal).
-        if net != 0 and not self._stop_in_flight():
+        if net != 0 and not self._stop_in_flight() and self._band_exit_trustworthy(net):
             exit_trigger = sell_price if net > 0 else buy_price
             reached = mid <= exit_trigger if net > 0 else mid >= exit_trigger
             if reached:
@@ -620,6 +645,31 @@ class RGridController(MarketMakingController):
                 TradeType.SELL, sell_price, step_base,
                 leg=LEG_ENTRY, allowed=allow_sell, mid=mid,
             )
+
+    def _band_exit_trustworthy(self, net: Decimal) -> bool:
+        """Whether the anchor is grounded in THIS position, not a seeded history.
+
+        ``seed_fills`` restores the exposure window from the whole SESSION's fills
+        (``get_session_recent_fills`` is scoped to the session, not the open
+        position), and the window is only ever scrubbed on a flat book
+        (``net == 0``). So a controller rebuilt while a position is OPEN — a worker
+        handoff, a reconfigure — carries prior cycles' prints, including their EXIT
+        prices, into the anchor.
+
+        That was survivable when the reducing side merely RESTED: a mispriced quote
+        sits there until price reaches it. Now that the band exit CROSSES, a stale
+        anchor flattens a healthy position at market on the first tick. Concretely:
+        cycle 1 shorts 100 and covers 95; cycle 2 goes long at 96; a rebuild puts
+        the anchor at 97.75, whose sell trigger is 97.67 — already above mid, so the
+        whole long is dumped at 96 instead of running.
+
+        So the crossing exit waits for one LIVE fill on the position's own side.
+        Until then the anchor is only a hint, and the session rail — which reads
+        venue PnL, not this window — remains the hard stop. The trailing stop is
+        deliberately NOT gated: it arms off observed price extremes, not the window.
+        """
+        leg = BUY if net > 0 else SELL
+        return leg in self._live_fill_legs
 
     def _track_trail(self, mid: Decimal, net: Decimal) -> None:
         """Update the favourable extreme and the armed flag. No orders here — the

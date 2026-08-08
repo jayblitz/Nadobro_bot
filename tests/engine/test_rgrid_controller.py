@@ -80,7 +80,14 @@ def _crossings(adapter, side=None):
 
 
 def _seed_leg(c, leg, px, base=Decimal(1)):
+    """Give a leg exposure as if it had been FILLED live in this process.
+
+    Distinct from ``seed_fills`` (the rebuild path), which restores the whole
+    SESSION's history and does NOT count as live evidence — see
+    test_a_rebuilt_controller_will_not_cross_off_a_seeded_anchor.
+    """
     c._leg_fills[leg].append((Decimal(str(px)), base))
+    c._live_fill_legs.add(leg)
 
 
 # ==========================================================================
@@ -612,3 +619,73 @@ def test_metrics_expose_the_anchor_and_both_leg_prices():
     assert m["rgrid_buy_trigger"] == pytest.approx(100.1)
     assert m["rgrid_sell_trigger"] == pytest.approx(99.9)
     assert m["rgrid_trail_armed"] is False
+
+
+def test_a_rebuilt_controller_will_not_cross_off_a_seeded_anchor():
+    """RGRID-SEED-ANCHOR. ``seed_fills`` restores the whole SESSION's fills — not
+    the open position's — and the window is only ever scrubbed on a flat book. So a
+    controller rebuilt while a position is OPEN inherits prior cycles' prints,
+    including their EXIT prices.
+
+    Survivable when the reducing side merely rested; not now that it CROSSES. Here
+    cycle 1 shorted at 100 and covered at 95, cycle 2 is long at 96: the seeded
+    anchor is 97.75, whose sell trigger sits ABOVE mid, so an ungated band exit
+    would dump a healthy long at market on the very first tick. It must wait for a
+    live fill on the position's own side; the session rail remains the hard stop."""
+    async def body():
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(96))
+        orch, c = _controller(adapter, extra={"order_amount_quote": Decimal(10)})
+        # The rebuild: session history, both legs, from a CLOSED prior cycle.
+        c._seed_from_history([
+            {"price": 95, "size": 1, "side": "buy"},
+            {"price": 100, "size": 1, "side": "sell"},
+        ])
+        await orch.spawn_controller(c)
+        # ...and we come back holding cycle 2's long.
+        c.inventory.apply_fill(1, PAIR, c.id, TradeType.BUY, Decimal(3), Decimal(288), Decimal(0))
+        assert c.exposure_anchor(Decimal(96)) > Decimal(96), (
+            "premise: the seeded anchor sits above mid, so the trigger is reached"
+        )
+
+        await orch.tick_controller(c.id)
+
+        assert not _crossings(adapter), (
+            "a seeded anchor flattened a healthy position at market"
+        )
+        assert c._net_base() == Decimal(3), "the position was closed"
+
+        # One live fill on the position's own side, and the exit is trusted again.
+        _seed_leg(c, "buy", 96, Decimal(3))
+        await orch.tick_controller(c.id)
+        assert _crossings(adapter), "a live-filled position must still be able to exit"
+
+    asyncio.run(body())
+
+
+def test_a_refused_exit_is_counted_and_escalated_not_retried_in_silence():
+    """The constant _MAX_CONSECUTIVE_EXIT_FAILURES existed but nothing used it: a
+    refused exit (kill switch, or max_open_executors — reduce-only is exempt from
+    the SIZE caps but not from those) left the position open, logged nothing, and
+    retried forever."""
+    async def body():
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
+        orch, c = _controller(adapter, extra={"order_amount_quote": Decimal(10)})
+        await orch.spawn_controller(c)
+        c.inventory.apply_fill(1, PAIR, c.id, TradeType.BUY, Decimal(3), Decimal(300), Decimal(0))
+        _seed_leg(c, "buy", 100, Decimal(3))
+
+        async def _refuse(*a, **k):
+            return False
+        c.spawn_executor = _refuse                      # type: ignore[assignment]
+
+        for expected in (1, 2, 3):
+            assert await c._fire_trail_stop(Decimal(3), Decimal(99)) is False
+            assert c._exit_failures == expected, "refusals are not being counted"
+
+        # A success clears it, so the escalation tracks CONSECUTIVE failures.
+        c._exit_failures = 4
+        del c.spawn_executor
+        assert await c._fire_trail_stop(Decimal(3), Decimal(99)) is True
+        assert c._exit_failures == 0
+
+    asyncio.run(body())
