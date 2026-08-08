@@ -288,27 +288,28 @@ def test_profit_booking_scales_out_on_tier_cross():
                                   inventory=inv, configs=cfg)
         # Seed a 1.0-base long @ 100 (margin 100): uPnL = net*(mark-entry).
         inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        red = _attach_reducer(c, inv)
 
-        # mid 102 -> uPnL +2 = +2% of margin -> only tier 1 (2%) books,
-        # and the filled reduce-only order is recorded back to inventory.
+        # mid 102 -> uPnL +2 = +2% of margin -> only tier 1 (2%) books, and the
+        # closed base is recorded back to inventory.
         await c._maybe_book_profit(Decimal("102"))
-        sells = [o for o in adapter.placed if o.side == TradeType.SELL]
-        assert len(sells) == 1
-        assert sells[0].order_type == OrderType.MARKET
-        assert abs(float(sells[0].amount_base) - 0.33) < 1e-9   # 33% of 1.0
+        assert len(red.requests) == 1
+        assert abs(float(red.requests[0]) - 0.33) < 1e-9        # 33% of 1.0
         assert inv.get(1, "P", c.id).net_amount_base == Decimal("0.670")
         assert c._booked_tiers == {0}
+        # Nothing crossed: a profit tier rests (the executor is what rests it —
+        # see tests/engine/executors/test_grid_executor.py).
+        assert not [o for o in adapter.placed if o.order_type is OrderType.MARKET]
 
         # Same tier again -> nothing new (booked once).
         await c._maybe_book_profit(Decimal("102"))
-        assert len([o for o in adapter.placed if o.side == TradeType.SELL]) == 1
+        assert len(red.requests) == 1
 
         # Jump high enough that the *remaining* position crosses tiers 4% and
         # 6%; the second close must size from 0.67 base, not stale 1.0 base.
         await c._maybe_book_profit(Decimal("109"))
-        sells = [o for o in adapter.placed if o.side == TradeType.SELL]
-        assert len(sells) == 2
-        assert sells[1].amount_base == Decimal("0.442")
+        assert len(red.requests) == 2
+        assert red.requests[1] == Decimal("0.442")
         assert inv.get(1, "P", c.id).net_amount_base == Decimal("0.228")
         assert c._booked_tiers == {0, 1, 2}
 
@@ -316,6 +317,9 @@ def test_profit_booking_scales_out_on_tier_cross():
 
 
 def test_profit_booking_does_not_book_tier_on_zero_fill():
+    """A tier is credited only against a real fill. Nothing closed here (there is
+    no executor to rest a close, and a profit tier is never crossed for), so the
+    tier must stay available for the next attempt."""
     from src.nadobro.engine.types import TradeType
 
     async def body():
@@ -417,6 +421,44 @@ def test_profit_booking_skips_when_below_tier():
 # basis the old code used), so the ladder completes AT the user's setting and
 # never books far below it. ------------------------------------------------
 
+
+class _Reducer:
+    """Stand-in for the live grid executor's ``reduce_position``.
+
+    The real one rests a post-only close and reports fills over several ticks
+    (PROFIT-TIER MAKER, 2026-08-08). These tests are about the TIER LADDER
+    arithmetic — which tier fires at which uPnL, and how the slice is sized — so
+    this one fills immediately and records what it was asked for. The maker
+    mechanics themselves are pinned in tests/engine/executors/test_grid_executor.py.
+    """
+
+    def __init__(self, inv, controller, *, fills: bool = True):
+        self.inv, self.c, self.fills = inv, controller, fills
+        self.requests: list = []
+
+    async def reduce_position(self, amount, mid=None):
+        amount = Decimal(str(amount))
+        self.requests.append(amount)
+        if not self.fills or amount <= 0:
+            return Decimal(0)
+        from src.nadobro.engine.types import TradeType
+        net = self.inv.get(self.c.user_id, "P", self.c.id).net_amount_base
+        side = TradeType.SELL if net > 0 else TradeType.BUY
+        px = Decimal(str(mid or 0))
+        self.inv.apply_fill(self.c.user_id, "P", self.c.id, side, amount, amount * px)
+        return amount
+
+
+def _attach_reducer(c, inv, **kw):
+    """Give the controller something that can work a close, the way a live grid
+    executor would. Without one, _maybe_book_profit deliberately does nothing —
+    it will not cross for a profit tier (see
+    test_a_profit_tier_will_not_cross_when_there_is_no_executor)."""
+    red = _Reducer(inv, c, **kw)
+    c.my_executors = lambda active_only=True: [red]   # type: ignore[assignment]
+    return red
+
+
 def _anchored_cfg(tp_pct, **over):
     # margin (notional) = 100, deployed = 500 (5x). tp_margin_basis is the
     # user's margin — the SAME basis the session TP rail measures against.
@@ -442,16 +484,17 @@ def test_tiered_tp_anchors_to_user_tp_not_deployed_basis():
         c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
                                   inventory=inv, configs=_anchored_cfg(50.0))
         inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        red = _attach_reducer(c, inv)
 
         # +$10 uPnL = 10% of margin: the OLD deployed-basis code booked here
         # (10/500 = 2% >= tier1); the anchored ladder does NOT (10% < 16.67%).
         await c._maybe_book_profit(Decimal("110"))
-        assert [o for o in adapter.placed if o.side == TradeType.SELL] == []
+        assert red.requests == []
         assert c._booked_tiers == set()
 
         # +$16.8 uPnL = 16.8% of margin >= first anchored tier (16.67%).
         await c._maybe_book_profit(Decimal("116.8"))
-        assert len([o for o in adapter.placed if o.side == TradeType.SELL]) == 1
+        assert len(red.requests) == 1
         assert c._booked_tiers == {0}
 
     asyncio.run(body())
@@ -469,6 +512,7 @@ def test_tiered_tp_top_tier_lands_exactly_at_user_tp():
         c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
                                   inventory=inv, configs=_anchored_cfg(50.0))
         inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        _attach_reducer(c, inv)
         # +$50 uPnL = 50% of margin = the user's TP -> all three anchored tiers
         # (16.67 / 33.33 / 50) cross at once.
         await c._maybe_book_profit(Decimal("150"))
@@ -489,6 +533,7 @@ def test_tiered_tp_scales_up_with_a_higher_user_tp():
         c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
                                   inventory=inv, configs=_anchored_cfg(200.0))
         inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        _attach_reducer(c, inv)
         await c._maybe_book_profit(Decimal("150"))    # +50% < 66.67% first tier
         assert c._booked_tiers == set()
         await c._maybe_book_profit(Decimal("166.8"))  # +66.8% >= first tier
@@ -512,6 +557,7 @@ def test_tiered_tp_falls_back_to_legacy_when_no_tp_set():
         c = DynamicGridController(user_id=1, orchestrator=orch, adapter=adapter,
                                   inventory=inv, configs=cfg)
         inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        _attach_reducer(c, inv)
         # +$2 uPnL = 2% of the $100 legacy basis -> first fixed tier books.
         await c._maybe_book_profit(Decimal("102"))
         assert c._booked_tiers == {0}
@@ -716,3 +762,149 @@ def test_missing_or_malformed_knobs_keep_the_current_value():
     assert c.trend_on_vr == 1.25
     _apply_dgrid_controller_config(c, {"dgrid_trend_on_vr": "not a number"})
     assert c.trend_on_vr == 1.25
+
+
+# ==========================================================================
+# PROFIT-TIER MAKER (2026-08-08) — booking is asynchronous now
+# ==========================================================================
+# The scale-out rests post-only instead of crossing on every tier, so a slice can
+# fill over several ticks (or not at all). A tier must therefore be credited only
+# when its slice has really closed — crediting on the first partial would consume
+# the tier and leave the profit unbooked, which is worse than the taker fee we set
+# out to save.
+def test_a_partial_fill_does_not_credit_the_tier_until_the_slice_closes():
+    from src.nadobro.engine.types import TradeType
+
+    class _Dribble:
+        """Fills a fixed small amount per call, like a resting order being picked
+        off in pieces."""
+
+        def __init__(self, inv, c, chunk):
+            self.inv, self.c, self.chunk = inv, c, Decimal(str(chunk))
+
+        async def reduce_position(self, amount, mid=None):
+            amount = Decimal(str(amount))
+            take = min(self.chunk, amount)
+            if take <= 0:
+                return Decimal(0)
+            self.inv.apply_fill(1, "P", self.c.id, TradeType.SELL, take,
+                                take * Decimal(str(mid or 0)))
+            return take
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(102))
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=ExecutorOrchestrator(),
+                                  adapter=adapter, inventory=inv, configs=cfg)
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        # 0.33 slice, filled 0.1 at a time -> 4 ticks to complete.
+        dribble = _Dribble(inv, c, "0.1")
+        c.my_executors = lambda active_only=True: [dribble]
+
+        await c._maybe_book_profit(Decimal("102"))
+        assert c._booked_tiers == set(), "credited the tier on a PARTIAL fill"
+        assert c._book_slice is not None
+        assert c._book_slice.done == Decimal("0.1")
+        assert c._book_slice.target == Decimal("0.33")
+
+        await c._maybe_book_profit(Decimal("102"))
+        assert c._booked_tiers == set()
+        assert c._book_slice.done == Decimal("0.2")
+
+        # Completing the slice credits the tier exactly once, and the slice clears.
+        for _ in range(3):
+            await c._maybe_book_profit(Decimal("102"))
+        assert c._booked_tiers == {0}
+        assert c._book_slice is None
+        # The target was never re-sized off the shrinking position.
+        assert abs(float(inv.get(1, "P", c.id).net_amount_base) - 0.67) < 1e-9
+
+    asyncio.run(body())
+
+
+def test_a_profit_tier_will_not_cross_when_there_is_no_executor():
+    """The post-flip orphan state: inventory held, no executor to rest a close.
+    This used to fire a naked reduce-only MARKET — the one order we have decided
+    never to cross for. It must place nothing and leave the tier uncredited, so
+    booking resumes when an executor exists again."""
+    from src.nadobro.engine.types import OrderType, TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(109))
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=ExecutorOrchestrator(),
+                                  adapter=adapter, inventory=inv, configs=cfg)
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+
+        await c._maybe_book_profit(Decimal("109"))
+
+        assert not [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        assert not [o for o in adapter.placed if o.side is TradeType.SELL]
+        assert c._booked_tiers == set()
+        assert inv.get(1, "P", c.id).net_amount_base == Decimal("1.0")
+
+    asyncio.run(body())
+
+
+def test_a_tier_crossing_while_a_slice_rests_extends_it_rather_than_queueing():
+    """A runaway move should scale out FASTER, not wait behind the slice already
+    resting — and only one close rests at a time, so the slice must grow."""
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(102))
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=ExecutorOrchestrator(),
+                                  adapter=adapter, inventory=inv, configs=cfg)
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        red = _attach_reducer(c, inv, fills=False)      # rests, never fills
+
+        await c._maybe_book_profit(Decimal("102"))      # tier 0
+        assert c._book_slice is not None
+        first_target = c._book_slice.target
+        assert c._book_slice.tiers == {0}
+
+        await c._maybe_book_profit(Decimal("109"))      # tiers 1 and 2 cross too
+        assert c._book_slice.tiers == {0, 1, 2}
+        assert c._book_slice.target > first_target, "the slice did not grow"
+        assert c._booked_tiers == set(), "nothing filled — nothing may be credited"
+        assert red.requests, "the close must keep being worked"
+
+    asyncio.run(body())
+
+
+def test_going_flat_clears_a_resting_slice_instead_of_working_a_ghost():
+    """If the position is gone (a flip flattened it, or the close filled in full),
+    the slice must not keep re-quoting a close for inventory that no longer
+    exists."""
+    from src.nadobro.engine.types import TradeType
+
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(102))
+        inv = InventoryRepository()
+        cfg = dict(CFG, candle_provider=lambda p: _range(), margin_quote="100",
+                   dgrid_tp_tiers_pct=[2.0, 4.0, 6.0], dgrid_tp_fraction=0.33)
+        c = DynamicGridController(user_id=1, orchestrator=ExecutorOrchestrator(),
+                                  adapter=adapter, inventory=inv, configs=cfg)
+        inv.apply_fill(1, "P", c.id, TradeType.BUY, Decimal("1.0"), Decimal("100"))
+        red = _attach_reducer(c, inv, fills=False)
+
+        await c._maybe_book_profit(Decimal("102"))
+        assert c._book_slice is not None
+        asked = len(red.requests)
+
+        # Something else flattened it (a flip's reduce-only stop-out).
+        inv.apply_fill(1, "P", c.id, TradeType.SELL, Decimal("1.0"), Decimal("102"))
+        await c._maybe_book_profit(Decimal("102"))
+
+        assert c._book_slice is None
+        assert c._booked_tiers == {0}, "a flattened slice's tiers are settled"
+        assert len(red.requests) == asked, "kept working a close with nothing held"
+
+    asyncio.run(body())

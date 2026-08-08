@@ -27,6 +27,7 @@ from __future__ import annotations
 import inspect
 import logging
 import time
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -42,7 +43,7 @@ from src.nadobro.engine.executors.grid_executor import GridExecutor
 from src.nadobro.engine.executors.reverse_grid_executor import ReverseGridExecutor
 from src.nadobro.engine.risk import ExecutorRequest
 from src.nadobro.engine.routines import variance_regime
-from src.nadobro.engine.types import OrderType, TradeType, _dec
+from src.nadobro.engine.types import TradeType, _dec
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,24 @@ _DGRID_AUTO_RESET_FLOOR_BP = LADDER_RECENTER_FLOOR_BP
 # neither hammer the venue with cancel/replace bursts nor starve fill
 # processing (the re-center path returns before ticking the executor).
 _DGRID_RECENTER_MIN_INTERVAL_S = LADDER_RECENTER_MIN_INTERVAL_S
+
+
+@dataclass
+class _BookSlice:
+    """The scale-out slice a resting MAKER close is currently working.
+
+    ``target`` is anchored when the slice opens (and extended when a further tier
+    crosses) rather than recomputed from the shrinking position each tick, which
+    would double-count as fills land. ``done`` accumulates real fills, and the
+    slice's ``tiers`` are credited only when it completes.
+    """
+    tiers: set = field(default_factory=set)
+    target: Decimal = Decimal(0)
+    done: Decimal = Decimal(0)
+
+    @property
+    def remaining(self) -> Decimal:
+        return self.target - self.done
 
 
 def _parse_tp_tiers(raw: object) -> List[float]:
@@ -114,6 +133,14 @@ class DynamicGridController(Controller):
         self.tp_tiers_pct = _parse_tp_tiers(self.cfg("dgrid_tp_tiers_pct"))
         self.tp_fraction = min(1.0, max(0.0, float(self.cfg("dgrid_tp_fraction", 0.33) or 0.33)))
         self._booked_tiers: set[int] = set()
+        # The slice currently being worked by a resting MAKER close. Booking is
+        # asynchronous now (PROFIT-TIER MAKER, 2026-08-08): the executor rests a
+        # post-only reduce-only order and reports fills over several ticks, so a
+        # tier is credited to ``_booked_tiers`` only once its slice has actually
+        # closed. Crediting on the first partial — what the MARKET version could
+        # get away with, since it filled or didn't within one call — would consume
+        # the tier and leave the profit unbooked.
+        self._book_slice: Optional[_BookSlice] = None
         # Re-center is ON by default so the grid tracks price (the whole point of
         # a *dynamic* grid). The executor re-center only re-quotes unfilled maker
         # opens — no flatten, no realized loss — so it is safe to follow closely.
@@ -590,7 +617,14 @@ class DynamicGridController(Controller):
         tier lands exactly at the user's TP %, measured against allocated margin
         — so the scale-out completes at the user's setting and never fires past
         it. Each tier books once per run; the ladder resets on a fresh
-        spawn/flip."""
+        spawn/flip.
+
+        MAKER-ONLY (2026-08-08). The scale-out rests post-only and chases instead
+        of crossing on every tier: a profit tier is discretionary, so unlike a stop
+        it can wait at the touch. Only the stop-out flatten still crosses. That
+        makes booking ASYNCHRONOUS, so the slice being worked is tracked in
+        ``_book_slice`` and its tiers are credited only once it has really closed.
+        """
         if (not self.tp_tiers_pct or self.tp_fraction <= 0 or self.inventory is None
                 or mid is None or mid <= 0):
             return
@@ -600,77 +634,117 @@ class DynamicGridController(Controller):
         hold = self.inventory.get(self.user_id, self.trading_pair, self.id)
         net = hold.net_amount_base
         if abs(net) <= 0:
+            # Flat. Whatever slice was resting is moot — credit its tiers so a
+            # fresh position starts from a clean ladder instead of re-quoting a
+            # close for a position that no longer exists.
+            if self._book_slice is not None:
+                self._booked_tiers |= self._book_slice.tiers
+                self._book_slice = None
             return
         upnl_pct = float(hold.unrealized_pnl(mid) / margin * Decimal(100))
         # Newly crossed, not-yet-booked tiers.
-        to_book = [
+        crossed = [
             i for i, t in enumerate(tiers)
             if upnl_pct >= t and i not in self._booked_tiers
         ]
-        if not to_book:
+        if self._book_slice is None and not crossed:
             return
-        frac = min(1.0, self.tp_fraction * len(to_book))
-        close_base = abs(net) * _dec(frac)
+        close_side = TradeType.SELL if net > 0 else TradeType.BUY
+        slice_ = self._book_slice or _BookSlice()
+        # A tier crossing while an earlier slice is still resting EXTENDS it rather
+        # than queuing behind it — the position keeps only one resting close, and a
+        # runaway move should scale out faster, not slower.
+        fresh = [i for i in crossed if i not in slice_.tiers]
+        if fresh:
+            frac = min(1.0, self.tp_fraction * len(fresh))
+            slice_.tiers.update(fresh)
+            slice_.target += self._quantize_base(abs(net) * _dec(frac))
+        # Never work more than is actually held (the position shrinks as we fill).
+        slice_.target = min(slice_.target, slice_.done + abs(net))
+        self._book_slice = slice_
+        if slice_.remaining > 0:
+            try:
+                slice_.done += await self._work_maker_close(
+                    slice_.remaining, close_side, mid,
+                )
+            except Exception:  # noqa: BLE001 - booking is best-effort; retry next tick
+                logger.warning("dgrid book_profit failed pair=%s (controller=%s)",
+                               self.trading_pair, self.id, exc_info=True)
+                return
+        # The slice is finished when it is filled, or when the dust left over is
+        # too small to rest — otherwise a partial fill would strand the tier
+        # forever and every later tier would pile onto a slice that can never
+        # complete. Nothing filled yet + untradeable remainder means "too small to
+        # rest at all": keep the slice open so the next tier merges into it.
+        if slice_.done > 0 and (
+            slice_.remaining <= 0 or self._quantize_base(slice_.remaining) <= 0
+        ):
+            self._booked_tiers |= slice_.tiers
+            self._book_slice = None
+            logger.info(
+                "dgrid book_profit pair=%s side=%s base=%s uPnL=%.2f%% tiers=%s "
+                "(maker; controller=%s)",
+                self.trading_pair, close_side.name, slice_.done, upnl_pct,
+                [round(tiers[i], 2) for i in sorted(slice_.tiers) if i < len(tiers)],
+                self.id,
+            )
+
+    def _quantize_base(self, amount: Decimal) -> Decimal:
+        """Round DOWN to the venue lot. Rounding up would deploy more than the
+        tier asked for."""
         try:
             lot = self.adapter.lot_size(self.trading_pair)
-            if lot and lot > 0:
-                close_base = (close_base // lot) * lot
-        except Exception:  # noqa: BLE001  # policy: degrade-ok(unquantized close is bumped by the venue min-notional guard)
-            pass
-        if close_base <= 0:
-            return  # below one lot — wait for a bigger position / higher tier
-        close_side = TradeType.SELL if net > 0 else TradeType.BUY
-        # DGRID-BOOK-RACE fix: route the reduction THROUGH the live grid
-        # executor (reduce_position) instead of firing a naked reduce-only
-        # MARKET at the adapter. The executor places the order, records the fill
-        # in the shared inventory, and advances its own per-level close
-        # accounting — so its resting close legs and the controller's net view
-        # can't drift apart. Falls back to nothing if no live executor.
+        except Exception:  # noqa: BLE001  # policy: degrade-ok(unknown lot ⇒ leave it to the venue guard)
+            return amount
+        if lot and lot > 0:
+            return (amount // lot) * lot
+        return amount
+
+    async def _work_maker_close(
+        self, remaining: Decimal, close_side: TradeType, mid: Decimal,
+    ) -> Decimal:
+        """Drive the resting maker close for the current slice; return the base
+        newly closed this tick.
+
+        DGRID-BOOK-RACE fix (kept): route the reduction THROUGH the live grid
+        executor (``reduce_position``) rather than firing an order at the adapter
+        behind its back. The executor places it, records the fill in the shared
+        inventory, and advances its own per-level close accounting — so its
+        resting close legs and the controller's net view can't drift apart.
+        """
         booked = Decimal(0)
-        try:
-            active_executors = list(self.my_executors(active_only=True))
-            for ex in active_executors:
-                rp = getattr(ex, "reduce_position", None)
-                if callable(rp):
-                    booked += await rp(close_base - booked)
-                if booked >= close_base:
-                    break
-            if booked <= 0 and not active_executors:
-                # Fallback: no live executor exposed a reduce path, but inventory
-                # is held — book directly with a reduce-only MARKET so the
-                # position can still scale out (preserves prior behavior).
-                lev = int(self.cfg("leverage", 1) or 1)
-                order = await self.adapter.place_order(
-                    self.trading_pair, close_side, OrderType.MARKET, close_base, None, lev, True,
-                )
-                # DGRID-BOOK-RECORD fix: only the amount that actually FILLED
-                # reduces the position. A naked reduce-only MARKET can come back
-                # unfilled (no liquidity / venue reject); booking close_base
-                # regardless would desync inventory from the venue and mark the
-                # tier booked when nothing closed. Record the real fill so the
-                # controller's net view stays true and the next tier sizes off
-                # the remaining position.
-                filled = _dec(getattr(order, "filled_base", 0) or 0)
-                if filled > 0:
-                    self.inventory.apply_fill(
-                        self.user_id, self.trading_pair, self.id, close_side,
-                        filled, _dec(getattr(order, "filled_quote", 0) or 0),
-                        _dec(getattr(order, "fee_quote", 0) or 0),
-                    )
-                booked = filled
-        except Exception:  # noqa: BLE001 - booking is best-effort; retry next tick
-            logger.warning("dgrid book_profit failed pair=%s (controller=%s)",
-                           self.trading_pair, self.id, exc_info=True)
-            return
-        if booked <= 0:
-            return  # nothing reduced
-        for i in to_book:
-            self._booked_tiers.add(i)
+        reducers = [
+            ex for ex in self.my_executors(active_only=True)
+            if callable(getattr(ex, "reduce_position", None))
+        ]
+        for ex in reducers:
+            want = remaining - booked
+            if want <= 0:
+                break
+            rp = getattr(ex, "reduce_position")
+            # Grid executors take the mid we already have, so working the resting
+            # close costs no extra venue read per tick. Anything else (a
+            # PositionExecutor, e.g.) keeps the original one-argument contract.
+            if isinstance(ex, GridExecutor):
+                booked += await ex.reduce_position(want, mid=mid)
+            else:
+                booked += _dec(await rp(want))
+        if reducers:
+            return booked
+        # No executor can work a close, yet inventory is held — the post-flip
+        # orphan state. Deliberately do NOTHING here: this used to fire a naked
+        # reduce-only MARKET, and a profit tier is exactly the order we have
+        # decided never to cross for. The position is not unprotected — the flip
+        # retry's own reduce-only flatten and the session SL/TP rail both still
+        # act, and the tier stays uncredited so booking resumes the moment an
+        # executor exists again.
         logger.info(
-            "dgrid book_profit pair=%s side=%s base=%s uPnL=%.2f%% tiers=%s (controller=%s)",
-            self.trading_pair, close_side.name, booked, upnl_pct,
-            [round(tiers[i], 2) for i in to_book], self.id,
+            "dgrid book_profit deferred pair=%s: %s base to scale out but no live "
+            "executor to rest a maker close — not crossing for a profit tier "
+            "(controller=%s)",
+            self.trading_pair, remaining, self.id,
         )
+        return Decimal(0)
 
     async def _spawn_phase(self, phase: str, mid: Optional[Decimal]) -> bool:
         net = self._inventory_net_base()
@@ -709,8 +783,10 @@ class DynamicGridController(Controller):
             self._grid_anchor_mid = _dec(mid)
             self.realized_move_bp = 0.0
             # Fresh position -> reset the profit-booking ladder so the new run
-            # can book from its first tier again.
+            # can book from its first tier again, and drop any slice the previous
+            # run was still working (its order was cancelled by the flip's stop).
             self._booked_tiers = set()
+            self._book_slice = None
             # Fresh run -> re-seed the trailing-reversal extreme/arm from here.
             self._reset_run_tracking(mid)
         else:
