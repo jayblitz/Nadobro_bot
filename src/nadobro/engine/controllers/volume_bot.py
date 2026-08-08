@@ -471,6 +471,7 @@ class VolumeBotController(Controller):
         execution: ExecutionStrategy = ExecutionStrategy.LIMIT_MAKER,
         position_action: PositionAction = PositionAction.OPEN,
         ref_price: Optional[Decimal] = None,
+        crosses_book: bool = False,
     ) -> tuple[bool, Optional[OrderExecutor]]:
         # MARKET carries no price (the venue fills at the touch); ``ref_price``
         # still sizes the risk request so a taker order is never submitted to
@@ -484,6 +485,10 @@ class VolumeBotController(Controller):
             price=price if execution is not ExecutionStrategy.MARKET else None,
             leverage=1,
             position_action=position_action,
+            # The vol bot's crossing legs stay LIMIT orders priced through the
+            # book, so nothing about the order says "taker" — the caller has to.
+            # Reporting only (RG-TAKERFLAG-1); it changes no order parameter.
+            crosses_book=crosses_book,
         )
         ex = OrderExecutor(
             cfg,
@@ -529,6 +534,7 @@ class VolumeBotController(Controller):
             ok, ex = await self._spawn_order(
                 TradeType.BUY, amount_base, buy_cap, kind="buy_taker",
                 execution=ExecutionStrategy.LIMIT, ref_price=ask,
+                crosses_book=True,
             )
         else:
             buy_price = self._buy_price(bid, ask)
@@ -664,6 +670,7 @@ class VolumeBotController(Controller):
             TradeType.SELL, amount, sell_cap, kind="sell_taker",
             execution=ExecutionStrategy.LIMIT,
             position_action=PositionAction.CLOSE, ref_price=bid,
+            crosses_book=True,
         )
         if ok and ex is not None:
             self.sell_id = ex.id
@@ -722,7 +729,7 @@ class VolumeBotController(Controller):
             amount = remaining_quote / px
             ok, new_ex = await self._spawn_order(
                 TradeType.BUY, amount, px, kind="buy_cross",
-                execution=ExecutionStrategy.LIMIT,
+                execution=ExecutionStrategy.LIMIT, crosses_book=True,
             )
             if ok and new_ex is not None:
                 self.buy_id = new_ex.id
@@ -750,7 +757,7 @@ class VolumeBotController(Controller):
         px = self._snap(px, tick, up=False)
         ok, new_ex = await self._spawn_order(
             TradeType.SELL, remaining, px, kind="sell_cross",
-            execution=ExecutionStrategy.LIMIT,
+            execution=ExecutionStrategy.LIMIT, crosses_book=True,
             position_action=PositionAction.CLOSE,
         )
         if ok and new_ex is not None:

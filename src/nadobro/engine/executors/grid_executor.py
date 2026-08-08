@@ -245,7 +245,8 @@ class GridExecutor(Executor):
         # Use the marginal price of this *chunk*, not the running VWAP.
         price = (delta_quote / delta_base) if delta_base > 0 else Decimal(0)
         self._record_fill(
-            Fill(order.id, self.trading_pair, side, delta_base, price, delta_fee, time.time())
+            Fill(order.id, self.trading_pair, side, delta_base, price, delta_fee, time.time()),
+            order,
         )
         if opening:
             level._open_recorded = order.filled_base
@@ -432,7 +433,8 @@ class GridExecutor(Executor):
         price = order.filled_quote / filled
         # Keep the shared inventory net consistent with the venue.
         self._record_fill(
-            Fill(order.id, self.trading_pair, self.close_side, filled, price, order.fee_quote, time.time())
+            Fill(order.id, self.trading_pair, self.close_side, filled, price, order.fee_quote, time.time()),
+            order,
         )
         # Advance per-level close accounting so resting close legs don't try to
         # re-close the booked amount; cancel & complete fully booked levels.
@@ -679,7 +681,8 @@ class GridExecutor(Executor):
                     Fill(
                         flat.id, self.trading_pair, self.close_side,
                         flat.filled_base, price, flat.fee_quote, time.time(),
-                    )
+                    ),
+                    flat,
                 )
                 remaining_flat = flat.filled_base
                 for level in self.levels:

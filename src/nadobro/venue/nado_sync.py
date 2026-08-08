@@ -717,6 +717,15 @@ def _write_matches(user_id: int, network: str, matches: list[dict[str, Any]]) ->
         # It is persisted only for column-shape compatibility — realized PnL is
         # DERIVED downstream from signed cash flow (see get_session_live_metrics);
         # never treat ``realized_pnl_x18`` as authoritative PnL.
+        # For the same reason there is no ``is_taker`` to write here: the SDK match
+        # model has no maker/taker flag either, so a VENUE-ONLY fill (one with no
+        # recorder row) leaves the column at its default. Engine fills get the flag
+        # from the executor that placed them (Executor._fill_was_taker), which reads
+        # the order type actually sent to the venue — the only place that knows.
+        # Do NOT "fix" this by guessing from price-vs-mid at sync time; the book has
+        # moved by then. The raw archive HTTP shape may carry is_taker (see
+        # venue/nado_archive._parse_match); switching this writer onto that source
+        # is the real fix if venue-only rows ever need the flag.
         pnl_x18 = _x18_field(match, "realized_pnl", "realized_pnl_x18")
         base_amount = from_x18(base_x18)
         # HUMAN columns. Rollups + PnL/History cards read fill_size * fill_price
