@@ -438,3 +438,126 @@ def test_the_price_of_a_close_fill_after_a_partial_booking_is_real():
         )
 
     asyncio.run(body())
+
+
+def test_the_stop_out_flatten_attributes_across_levels_like_any_external_close():
+    """The flatten closes inventory spread over SEVERAL levels, so it must use the
+    same attribution + completion rule as a profit tier — it is an external close
+    too. It used to inline its own copy of both, which only worked because
+    cancel-all had already run: a latent dependency on call order, duplicated, on
+    the path that closes a user's position."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(105))
+        inv = InventoryRepository()
+        ex = _ex(_cfg(keep_position=False), adapter, inv)
+        await ex.on_create()
+        held = ex.levels[:3]
+        for lv in held:
+            adapter.fill_order(lv.open_order_id, price=lv.open_price)
+        await ex.on_tick()
+        assert inv.get(1, PAIR, "c").net_amount_base > 0
+
+        await ex.on_stop(CloseType.EARLY_STOP)
+
+        assert inv.get(1, PAIR, "c").net_amount_base == Decimal(0)
+        assert ex._net_base() == Decimal(0)
+        # Every level that held inventory is settled and carries no dangling close
+        # leg — and the accounting lands in the EXTERNAL counter, never in the
+        # close-order watermark that _ingest owns.
+        for lv in held:
+            assert lv.state is GridLevelState.COMPLETE, f"level {lv.index} unsettled"
+            assert lv.close_order_id is None
+            assert lv._close_recorded + lv._close_booked_base >= lv.filled_base
+            assert lv._close_booked_base > 0, "flatten volume must be external"
+
+    asyncio.run(body())
+
+
+def test_completing_a_level_reaps_a_STILL_RESTING_entry_order():
+    """GRID-COMPLETE-ORPHAN. A level can be completed while its OPEN order is still
+    resting and only partly filled — an external close books the filled part, which
+    is all the level holds. Clearing only the close leg left the entry live on the
+    venue, and with recycle_levels (D-Grid's default) the recycled slot DISCARDS the
+    id and places a second entry at the same price: two live orders on one rung,
+    with the orphan invisible to _net_base, to _cancel_all_resting, and to the flat
+    check that gates the next phase spawn."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(105))
+        ex = _ex(_cfg(recycle_levels=True), adapter, InventoryRepository())
+        await ex.on_create()
+        lv = ex.levels[0]
+        entry_id = lv.open_order_id
+        adapter.fill_order(entry_id, amount=lv.amount_base / 2, price=lv.open_price)
+        await ex.on_tick()
+        assert lv.state is GridLevelState.OPEN_ORDER_PLACED, (
+            "premise: a partial open fill leaves the entry resting"
+        )
+
+        await ex.reduce_position(lv.filled_base)      # a tier books the partial
+
+        assert lv.state is GridLevelState.COMPLETE
+        assert lv.open_order_id is None, "the completed level still tracks an entry"
+        assert entry_id in adapter.cancelled, (
+            "the entry order was orphaned — it is still live on the venue and the "
+            "recycle will place a SECOND order on the same rung"
+        )
+
+    asyncio.run(body())
+
+
+def test_a_partial_external_book_resizes_the_levels_close_leg():
+    """GRID-CLOSE-OVERSIZED. reduce_only is an ACCOUNT-level flag, not per-level, so
+    a close leg left sized for base its own level no longer holds fills in full and
+    closes ANOTHER rung's base at this rung's price."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(105))
+        ex = _ex(_cfg(), adapter, InventoryRepository())
+        await ex.on_create()
+        for lv in ex.levels[:2]:
+            adapter.fill_order(lv.open_order_id, price=lv.open_price)
+        await ex.on_tick()
+        target = ex.levels[0]
+        assert target.state is GridLevelState.CLOSE_ORDER_PLACED
+        original = next(o for o in adapter.placed if o.id == target.close_order_id)
+        assert original.amount_base == target.filled_base
+
+        # Book HALF of that level externally.
+        await ex.reduce_position(target.filled_base / 2)
+
+        assert target.state is GridLevelState.CLOSE_ORDER_PLACED
+        assert target.close_order_id != original.id, "the oversized leg still rests"
+        assert original.id in adapter.cancelled
+        resized = next(o for o in adapter.placed if o.id == target.close_order_id)
+        expected = (target.filled_base - target._close_recorded
+                    - target._close_booked_base)
+        assert resized.amount_base == expected, (
+            f"close leg rests {resized.amount_base} against {expected} held"
+        )
+        assert resized.order_type is OrderType.LIMIT_MAKER, "still a maker leg"
+
+    asyncio.run(body())
+
+
+def test_a_failing_profit_tier_does_not_kill_the_ladder():
+    """A profit tier is DISCRETIONARY. Routing it through _guard meant three adapter
+    errors terminated the whole executor FAILED — and _terminate cancels nothing, so
+    every resting order was stranded on the venue with nobody driving them, the
+    position unmanaged and D-Grid dark (its flat check refuses to spawn)."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(105))
+        ex = _ex(_cfg(), adapter, InventoryRepository())
+        await ex.on_create()
+        lv = ex.levels[0]
+        adapter.fill_order(lv.open_order_id, price=lv.open_price)
+        await ex.on_tick()
+        resting_before = [l.close_order_id for l in ex.levels if l.close_order_id]
+
+        adapter.fail_on = {"place_order"}
+        adapter.fail_remaining = 99
+        booked = await ex.reduce_position(lv.filled_base)
+
+        assert booked == Decimal(0)
+        assert not ex.is_terminated, "a failed profit tier killed the ladder"
+        assert [l.close_order_id for l in ex.levels if l.close_order_id] == resting_before
+
+    asyncio.run(body())

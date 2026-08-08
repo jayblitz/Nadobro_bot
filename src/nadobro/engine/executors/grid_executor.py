@@ -485,13 +485,20 @@ class GridExecutor(Executor):
         # No min-notional guard: a MARKET order is not subject to the venue's
         # RESTING minimum, which is exactly why crossing is the right tool for an
         # exit that would otherwise be too small to place at all.
-        order = await self._guard(
-            lambda: self.adapter.place_order(
+        # NOT via _guard: it terminates the executor FAILED after its retries, and
+        # _terminate cancels nothing — so a transient venue error on a DISCRETIONARY
+        # profit tier used to kill the ladder and strand every resting order on the
+        # venue with no executor driving them. A tier is best-effort; the stop-out
+        # flatten is the path that may terminate.
+        try:
+            order = await self.adapter.place_order(
                 self.trading_pair, self.close_side, OrderType.MARKET,
                 reduce, None, self.config.leverage, True,
-            ),
-            label="grid_book_reduce",
-        )
+            )
+        except Exception as exc:  # noqa: BLE001 - booking is best-effort, retry next tick
+            logger.warning("grid %s: profit-tier book failed (retry next tick): %s",
+                           self.id, exc)
+            return Decimal(0)
         if order is None:
             return Decimal(0)
         self._book_recorded_base = Decimal(0)
@@ -516,16 +523,26 @@ class GridExecutor(Executor):
         """
         if lv._close_recorded + lv._close_booked_base < lv.filled_base:
             return False
-        if lv.close_order_id is not None:
-            cid = lv.close_order_id
+        # BOTH legs. A level can be completed while its OPEN order is still resting
+        # and only partially filled — an external close books the filled part, which
+        # is all this level "holds". Clearing only the close leg left the entry live
+        # on the venue, and with recycle_levels (D-Grid's default) the recycled slot
+        # DISCARDS the id and places a second entry at the same price: two live
+        # orders on one rung, the orphan invisible to _net_base, to
+        # _cancel_all_resting and to the flat check that gates the next phase.
+        for attr, label in (("open_order_id", "grid_open_complete_cancel"),
+                            ("close_order_id", "grid_close_complete_cancel")):
+            oid = getattr(lv, attr)
+            if oid is None:
+                continue
+            cid = oid
             try:
-                await self._guard(lambda: self.adapter.cancel_order(cid),
-                                  label="grid_close_complete_cancel")
+                await self._guard(lambda: self.adapter.cancel_order(cid), label=label)
                 self.orders_cancelled += 1
             except Exception as exc:  # noqa: BLE001 - cancel is best-effort
                 logger.warning("grid %s: completing level cancel failed for %s: %s",
                                self.id, cid, exc)
-            lv.close_order_id = None
+            setattr(lv, attr, None)
         lv.state = GridLevelState.COMPLETE
         return True
 
@@ -542,7 +559,28 @@ class GridExecutor(Executor):
             take = min(lv_held, remaining)
             lv._close_booked_base += take
             remaining -= take
-            await self._maybe_complete_level(lv)
+            if await self._maybe_complete_level(lv):
+                continue
+            # Booked only PART of this level: its resting close leg is now sized for
+            # base the level no longer holds. reduce_only is an account-level flag,
+            # not per-level, so with other rungs still holding inventory the
+            # oversized leg fills in full and closes ANOTHER rung's base at this
+            # rung's price. Re-place it at what is actually left.
+            if lv.state is GridLevelState.CLOSE_ORDER_PLACED and lv.close_order_id:
+                cid = lv.close_order_id
+                try:
+                    await self._guard(lambda: self.adapter.cancel_order(cid),
+                                      label="grid_close_resize_cancel")
+                    self.orders_cancelled += 1
+                except Exception as exc:  # noqa: BLE001 - cancel is best-effort
+                    logger.warning("grid %s: close-leg resize cancel failed for %s: %s",
+                                   self.id, cid, exc)
+                    continue          # leave it be rather than double-place
+                lv.close_order_id = None
+                lv.state = GridLevelState.OPEN_ORDER_FILLED
+                await self._place_close_remaining(
+                    lv, lv.filled_base - lv._close_recorded - lv._close_booked_base,
+                )
 
     async def on_tick(self) -> None:
         if self.is_terminated:
@@ -776,21 +814,14 @@ class GridExecutor(Executor):
                     ),
                     flat,
                 )
-                remaining_flat = flat.filled_base
-                for level in self.levels:
-                    if remaining_flat <= 0:
-                        break
-                    held = (level.filled_base - level._close_recorded
-                            - level._close_booked_base)
-                    if held <= 0:
-                        continue
-                    take = min(held, remaining_flat)
-                    level._close_booked_base += take
-                    remaining_flat -= take
-                    if (level._close_recorded + level._close_booked_base
-                            >= level.filled_base):
-                        level.state = GridLevelState.COMPLETE
-                        level.close_order_id = None
+                # The flatten is an EXTERNAL close like a profit tier, so it goes
+                # through the same attribution and completion rule. This used to
+                # inline a copy of both, which worked only because
+                # _cancel_all_resting() runs first — a latent dependency on call
+                # order, in duplicated arithmetic, on the path that closes a user's
+                # position. The redundant cancel _maybe_complete_level may issue for
+                # an already-cancelled leg is idempotent at the adapter.
+                await self._advance_close_accounting(flat.filled_base)
             remaining = self._net_base()
             if remaining > Decimal("1e-12"):
                 logger.warning(

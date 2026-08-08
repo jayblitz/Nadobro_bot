@@ -1277,7 +1277,9 @@ def map_strategy_config(
         # trips fit inside the stop. Only ever shrinks it, and is skipped when the
         # user disarmed their stop (no budget to size against).
         from src.nadobro.quant.mm_quote_math import DEFAULT_MIN_ORDER_NOTIONAL_USD
-        from src.nadobro.quant.rgrid_sizing import resolve_step_quote
+        from src.nadobro.quant.rgrid_sizing import (
+            TAKER_ROUND_TRIP_RATE, resolve_step_quote,
+        )
         from src.nadobro.strategy.strategy_registry import (
             effective_sl_tp_pct,
             session_margin_usd,
@@ -1301,6 +1303,17 @@ def map_strategy_config(
             # the session rail always fires before the exit can trigger.
             band_frac=_band,
         )
+        # Derive the exposure ceiling from the same budget the step cap uses.
+        _rg_budget = _dec(str(_rg_margin * _rg_sl_pct / 100.0))
+        _rg_exposure_pct = _f(settings, "max_net_exposure_pct", 30.0)
+        if _rg_budget > 0 and deployed > 0:
+            _rg_move = _band + _dec(str(TAKER_ROUND_TRIP_RATE))
+            if _rg_move > 0:
+                _afford = _rg_budget / _rg_move          # USD of exposure
+                _rg_exposure_pct = min(
+                    _rg_exposure_pct,
+                    float(_afford / _dec(str(deployed)) * Decimal(100)),
+                )
         if _step_plan.capped:
             logger.info(
                 "rgrid step capped by the stop budget: %s -> %s (stop $%.2f, round "
@@ -1350,6 +1363,19 @@ def map_strategy_config(
                 1.0, max(0.0, _f(settings, "rgrid_discretion", 0.0)) * 2.0
             ),
             **_quote_defense_defaults(settings, deployed, auto_spread=spread_frac <= 0),
+            # THE CEILING THE STEP CAP CANNOT REACH — after the defaults on
+            # purpose, so this wins the dict literal.
+            # R-Grid has no break counter: it adds one step per break until the
+            # NET-EXPOSURE CAP stops it, and that cap is step-INDEPENDENT. A bound
+            # written as ``levels * step`` therefore models a pyramid the strategy
+            # never stops at: at $100/50x the modelled $400 is really $1,500 (15
+            # steps), where ONE crossing exit costs 81% of a 0.8% stop and a single
+            # band of adverse move costs 3.5x it. Shrinking the step cannot fix
+            # that — it just takes more breaks to reach the same ceiling. So bound
+            # the CAP: hold only the exposure that a band of adverse move plus the
+            # round trip can afford out of the stop budget. min() with the user's
+            # setting, so this only ever tightens.
+            "max_net_exposure_pct": _rg_exposure_pct,
             # The regime gate would pause momentum exactly when it must act. OFF
             # unless the user (or the overlay's suppress posture) re-arms it; the
             # net-exposure cap, the trailing soft reset and the session SL/TP rails

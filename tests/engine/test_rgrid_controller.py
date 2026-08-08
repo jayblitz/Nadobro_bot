@@ -61,9 +61,22 @@ def _controller(adapter, extra=None):
 
 
 def _resting(adapter, side=None):
-    """Orders placed, optionally filtered by side."""
-    out = [o for o in adapter.placed if side is None or o.side is side]
+    """Orders that actually REST — post-only only, optionally filtered by side.
+
+    It used to return every placed order regardless of type, so a test asserting
+    "the reducing leg rests" was satisfied by the crossing MARKET exit and passed
+    while asserting the opposite of shipped behaviour."""
+    out = [o for o in adapter.placed
+           if o.order_type is OrderType.LIMIT_MAKER
+           and (side is None or o.side is side)]
     return out
+
+
+def _crossings(adapter, side=None):
+    """Orders that CROSS — every risk exit is one of these."""
+    return [o for o in adapter.placed
+            if o.order_type is OrderType.MARKET
+            and (side is None or o.side is side)]
 
 
 def _seed_leg(c, leg, px, base=Decimal(1)):
@@ -318,21 +331,49 @@ def test_no_fills_waits_at_the_seeded_mid():
 # ==========================================================================
 # 4. Sizing
 # ==========================================================================
-def test_the_reducing_leg_rests_the_whole_position_the_adding_leg_one_step():
-    """A turn books the whole position in one fill instead of a step per tick while
-    the move runs against it."""
+def test_the_exposure_band_exit_CROSSES_the_whole_position():
+    """ENTRIES REST, EXITS CROSS. The reducing side is a TRIGGER, not a quote: when
+    mid reaches anchor*(1-band) for a long, R-Grid crosses the WHOLE position in one
+    reduce-only MARKET order. A turn books everything at once instead of a step per
+    tick while the move runs against it.
+
+    This test previously asserted the reducing leg RESTED, and passed only because
+    the `_resting` helper did not filter by order type — the MARKET exit satisfied
+    it. Both are fixed."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=True)
         orch, c = _controller(adapter, extra={"order_amount_quote": Decimal(10)})
         await orch.spawn_controller(c)
-        # Net long 3 units, anchor 100.
+        # Net long 3 units, anchor 100 -> sell trigger at 99.9.
         c.inventory.apply_fill(1, PAIR, c.id, TradeType.BUY, Decimal(3), Decimal(300), Decimal(0))
         _seed_leg(c, "buy", 100, Decimal(3))
-        adapter.set_mid(Decimal("99"))           # sell leg (the reducer) postable
+        adapter.set_mid(Decimal("99"))           # through the trigger
         await orch.tick_controller(c.id)
-        sells = _resting(adapter, TradeType.SELL)
-        assert sells, "the reducing leg should rest"
-        assert sells[-1].amount_base == Decimal(3), "reducer must rest the whole position"
+
+        crossed = _crossings(adapter, TradeType.SELL)
+        assert crossed, "the exposure-band exit did not cross"
+        assert crossed[-1].amount_base == Decimal(3), "must close the WHOLE position"
+        assert not _resting(adapter, TradeType.SELL), (
+            "nothing may rest on the reducing side — it is a trigger now"
+        )
+
+    asyncio.run(body())
+
+
+def test_the_adding_leg_still_rests_post_only_while_a_position_is_open():
+    """The other half of the ruling: entries never cross. With a long open, the BUY
+    that adds to it is still a post-only maker."""
+    async def body():
+        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=True)
+        orch, c = _controller(adapter, extra={"order_amount_quote": Decimal(10)})
+        await orch.spawn_controller(c)
+        c.inventory.apply_fill(1, PAIR, c.id, TradeType.BUY, Decimal(3), Decimal(300), Decimal(0))
+        _seed_leg(c, "buy", 100, Decimal(3))
+        adapter.set_mid(Decimal("101"))          # above the anchor: the adder quotes
+        await orch.tick_controller(c.id)
+
+        assert _resting(adapter, TradeType.BUY), "the adding leg must rest post-only"
+        assert not _crossings(adapter), "an entry must never cross"
 
     asyncio.run(body())
 
