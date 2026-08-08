@@ -84,7 +84,7 @@ def _controller(adapter, recorder, extra=None):
 
 def test_a_break_entry_reaches_the_reporting_bridge():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         rec = _SpyRecorder()
         orch, c = _controller(adapter, rec)
         await orch.spawn_controller(c)
@@ -106,7 +106,7 @@ def test_the_trailing_exit_reaches_the_bridge_too():
     the open is counted and the close is not, so the session shows a position it
     no longer holds and undercounts volume."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         rec = _SpyRecorder()
         orch, c = _controller(adapter, rec, extra={
             "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
@@ -127,7 +127,7 @@ def test_the_trailing_exit_reaches_the_bridge_too():
 
 def test_the_reversal_flatten_reaches_the_bridge():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         rec = _SpyRecorder()
         orch, c = _controller(adapter, rec)
         await orch.spawn_controller(c)
@@ -145,7 +145,7 @@ def test_maker_fills_report_maker_and_the_crossing_stop_reports_taker():
     """The flag is derived from the order type, so the mixed execution model is
     reported honestly: resting quotes are maker, the trailing stop is a taker."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         rec = _SpyRecorder()
         orch, c = _controller(adapter, rec, extra={
             "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
@@ -158,9 +158,9 @@ def test_maker_fills_report_maker_and_the_crossing_stop_reports_taker():
         takers = [r for r in rec.rows if r["is_taker"] is True]
         assert makers, "the resting quotes should report maker"
         # Exactly the crossing orders report taker, and there is at most one stop.
-        crossing = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        crossing = [o for o in adapter.placed if o.order_type is OrderType.LIMIT]
         assert len(takers) == len(crossing)
-        assert all(o.order_type in (OrderType.LIMIT_MAKER, OrderType.MARKET)
+        assert all(o.order_type in (OrderType.LIMIT_MAKER, OrderType.LIMIT)
                    for o in adapter.placed)
 
     asyncio.run(body())
@@ -170,7 +170,7 @@ def test_the_recorder_is_injected_into_the_new_executor_class():
     """The orchestrator injects the recorder at spawn. RGridMakerExecutor is a new
     class; if injection were class-gated, R-Grid would go dark on every surface."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         rec = _SpyRecorder()
         orch, c = _controller(adapter, rec)
         await orch.spawn_controller(c)
@@ -207,7 +207,7 @@ def test_the_bridge_survives_a_recorder_that_raises():
             def record(self, *a, **k):
                 raise RuntimeError("db down")
 
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         orch, c = _controller(adapter, _Broken())
         await orch.spawn_controller(c)
         await _walk(orch, c, adapter, ["101"])

@@ -45,7 +45,7 @@ def test_level_generation_count_and_prices():
 
 def test_on_create_places_all_in_bounds_open_orders():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         ex = _ex(_cfg(), adapter)
         await ex.on_create()
         assert ex.is_active
@@ -57,7 +57,7 @@ def test_on_create_places_all_in_bounds_open_orders():
 
 def test_level_fill_places_close_then_completes():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         inv = InventoryRepository()
         ex = _ex(_cfg(), adapter, inv)
         await ex.on_create()
@@ -76,7 +76,7 @@ def test_level_fill_places_close_then_completes():
 
 def test_activation_bounds_skips_far_levels():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         ex = _ex(_cfg(activation_bounds=Decimal("0.03")), adapter)
         await ex.on_create()
         # within 3% of 100 -> only 100 and 102.5
@@ -87,7 +87,7 @@ def test_activation_bounds_skips_far_levels():
 
 def test_activation_bounds_cancels_when_mid_moves_away():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         ex = _ex(_cfg(activation_bounds=Decimal("0.03")), adapter)
         await ex.on_create()
         lvl0 = ex.levels[0]
@@ -102,7 +102,7 @@ def test_activation_bounds_cancels_when_mid_moves_away():
 
 def test_limit_price_breach_triggers_stop_loss():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         ex = _ex(_cfg(limit_price=Decimal(98)), adapter)
         await ex.on_create()
         adapter.set_mid(Decimal(97))  # below hard stop
@@ -119,7 +119,7 @@ def test_take_profit_breach_triggers_take_profit():
     from src.nadobro.engine.types import TripleBarrierConfig
 
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         # BUY grid; 5% take-profit, no limit_price/stop so only TP can fire.
         cfg = _cfg(
             start_price=Decimal(100), end_price=Decimal(100), limit_price=Decimal(0),
@@ -144,7 +144,7 @@ def test_no_take_profit_without_a_position():
     from src.nadobro.engine.types import TripleBarrierConfig
 
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
         cfg = _cfg(limit_price=Decimal(0),
                    triple_barrier_config=TripleBarrierConfig(take_profit=Decimal("0.01"), stop_loss=None))
         ex = _ex(cfg, adapter, InventoryRepository())
@@ -164,7 +164,7 @@ def test_reduce_position_books_through_executor_and_advances_accounting():
 
     TAKER RISK EXITS: it crosses, so it returns what it closed synchronously."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         inv = InventoryRepository()
         ex = _ex(_cfg(), adapter, inv)
         await ex.on_create()
@@ -191,7 +191,7 @@ def test_reduce_position_books_through_executor_and_advances_accounting():
 def test_reduce_position_caps_at_held_inventory():
     """Asking to reduce more than is held only books what's actually held."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         inv = InventoryRepository()
         ex = _ex(_cfg(), adapter, inv)
         await ex.on_create()
@@ -212,18 +212,18 @@ def test_the_profit_tier_exit_crosses():
     orphan an order nobody was left to drive. The ladder's own paired close legs
     stay post-only — those are the strategy, not a risk exit."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         ex = _ex(_cfg(), adapter, InventoryRepository())
         await ex.on_create()
         lv = ex.levels[0]
         adapter.fill_order(lv.open_order_id, price=lv.open_price)
         await ex.on_tick()
-        opens = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        opens = [o for o in adapter.placed if o.order_type is OrderType.LIMIT]
         assert not opens, "the ladder itself must not cross"
 
         await ex.reduce_position(lv.filled_base)
 
-        crossing = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        crossing = [o for o in adapter.placed if o.order_type is OrderType.LIMIT]
         assert len(crossing) == 1, "the tier exit did not cross"
         assert crossing[0].side is ex.close_side
         # ...and the ladder's own legs are still makers.
@@ -239,7 +239,7 @@ def test_a_sub_minimum_slice_still_exits_because_it_crosses():
     not subject to the resting minimum — so the exit always goes out. This is one
     of the concrete reasons risk exits cross."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105), min_notional=Decimal(1_000_000))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105), min_notional=Decimal(1_000_000))
         ex = _ex(_cfg(), adapter, InventoryRepository())
         await ex.on_create()
         lv = ex.levels[0]
@@ -249,7 +249,7 @@ def test_a_sub_minimum_slice_still_exits_because_it_crosses():
         booked = await ex.reduce_position(lv.filled_base)
 
         assert booked > 0, "a sub-minimum exit was refused — the position strands"
-        assert [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        assert [o for o in adapter.placed if o.order_type is OrderType.LIMIT]
 
     asyncio.run(body())
 
@@ -261,7 +261,7 @@ def test_reduce_position_books_nothing_on_zero_fill():
     nothing. Booking the requested size would inject a phantom close at price 0
     into inventory and wrongly complete a level, desyncing from the venue."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105), auto_fill_market=False)
         inv = InventoryRepository()
         ex = _ex(_cfg(), adapter, inv)
         await ex.on_create()
@@ -284,7 +284,7 @@ def test_reduce_position_books_nothing_on_zero_fill():
 
 def test_keep_position_false_flattens_on_stop():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         inv = InventoryRepository()
         ex = _ex(_cfg(keep_position=False), adapter, inv)
         await ex.on_create()
@@ -300,7 +300,7 @@ def test_keep_position_false_flattens_on_stop():
 
 def test_keep_position_false_retries_when_stop_flatten_zero_fills():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105), auto_fill_market=False)
         inv = InventoryRepository()
         ex = _ex(_cfg(keep_position=False), adapter, inv)
         await ex.on_create()
@@ -312,7 +312,7 @@ def test_keep_position_false_retries_when_stop_flatten_zero_fills():
 
         await ex.on_stop(CloseType.EARLY_STOP)
 
-        markets = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        markets = [o for o in adapter.placed if o.order_type is OrderType.LIMIT]
         assert len(markets) == 1
         assert markets[0].filled_base == Decimal(0)
         assert not ex.is_terminated
@@ -323,7 +323,7 @@ def test_keep_position_false_retries_when_stop_flatten_zero_fills():
 
 def test_keep_position_true_retains_on_stop():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         inv = InventoryRepository()
         ex = _ex(_cfg(keep_position=True), adapter, inv)
         await ex.on_create()
@@ -340,7 +340,7 @@ def test_keep_position_true_retains_on_stop():
 
 def test_adversarial_transient_errors_on_open_placement():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105), fail_on=["place_order"], fail_times=2)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105), fail_on=["place_order"], fail_times=2)
         ex = _ex(_cfg(), adapter)
         await ex.on_create()
         # first level retried twice then placed; all levels eventually placed
@@ -367,7 +367,7 @@ def test_a_PARTIAL_profit_tier_booking_does_not_destroy_the_levels_close_fill():
     (dynamic_grid._spawn_phase refuses on a non-flat net), i.e. D-Grid goes dark.
     """
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         inv = InventoryRepository()
         ex = _ex(_cfg(), adapter, inv)
         await ex.on_create()
@@ -406,7 +406,7 @@ def test_the_price_of_a_close_fill_after_a_partial_booking_is_real():
     quote by a shrunken base delta and bridges the fill at a price far from what
     the venue actually paid."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         rec = []
 
         class _Spy:
@@ -447,7 +447,7 @@ def test_the_stop_out_flatten_attributes_across_levels_like_any_external_close()
     cancel-all had already run: a latent dependency on call order, duplicated, on
     the path that closes a user's position."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         inv = InventoryRepository()
         ex = _ex(_cfg(keep_position=False), adapter, inv)
         await ex.on_create()
@@ -482,7 +482,7 @@ def test_completing_a_level_reaps_a_STILL_RESTING_entry_order():
     with the orphan invisible to _net_base, to _cancel_all_resting, and to the flat
     check that gates the next phase spawn."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         ex = _ex(_cfg(recycle_levels=True), adapter, InventoryRepository())
         await ex.on_create()
         lv = ex.levels[0]
@@ -510,7 +510,7 @@ def test_a_partial_external_book_resizes_the_levels_close_leg():
     a close leg left sized for base its own level no longer holds fills in full and
     closes ANOTHER rung's base at this rung's price."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         ex = _ex(_cfg(), adapter, InventoryRepository())
         await ex.on_create()
         for lv in ex.levels[:2]:
@@ -544,7 +544,7 @@ def test_a_failing_profit_tier_does_not_kill_the_ladder():
     every resting order was stranded on the venue with nobody driving them, the
     position unmanaged and D-Grid dark (its flat check refuses to spawn)."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         ex = _ex(_cfg(), adapter, InventoryRepository())
         await ex.on_create()
         lv = ex.levels[0]

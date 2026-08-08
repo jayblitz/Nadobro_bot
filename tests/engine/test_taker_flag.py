@@ -71,7 +71,7 @@ def test_a_vol_bot_crossing_leg_records_as_taker():
     book but still limit orders, so nothing about the order type says "taker".
     Every one of its fills used to record as maker."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         rec = _SpyRecorder()
         orch = ExecutorOrchestrator(trade_recorder=rec)
         c = VolumeBotController(
@@ -104,7 +104,7 @@ def test_the_vol_bots_resting_quotes_still_record_as_maker():
     """Control. The maker path must NOT be swept into the taker bucket — the
     whole point of the v3 maker mode is that those fills pay the maker fee."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         rec = _SpyRecorder()
         orch = ExecutorOrchestrator(trade_recorder=rec)
         c = VolumeBotController(
@@ -205,7 +205,7 @@ def test_a_grid_stop_out_flatten_records_as_taker():
     derivation returned False for a reduce-only MARKET flatten. The resting
     ladder fills around it must stay maker."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(105))
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(105))
         rec = _SpyRecorder()
         inv = InventoryRepository()
         cfg = GridExecutorConfig(

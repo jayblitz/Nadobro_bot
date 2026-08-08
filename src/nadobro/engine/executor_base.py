@@ -208,7 +208,10 @@ class Executor(abc.ABC):
         except Exception:  # noqa: BLE001  # policy: degrade-ok(unknown shape ⇒ prior behaviour)
             return False
 
-    def _record_fill(self, fill: Fill, order: Optional[NadoOrder] = None) -> None:
+    def _record_fill(
+        self, fill: Fill, order: Optional[NadoOrder] = None, *,
+        crossed: Optional[bool] = None,
+    ) -> None:
         """Book a fill into inventory and bridge it to the reporting tables.
 
         Pass ``order`` — the NadoOrder this fill came off — whenever the caller has
@@ -246,7 +249,8 @@ class Executor(abc.ABC):
                     fill.fee_quote,
                     fill.order_id,
                     fill.timestamp,
-                    is_taker=self._fill_was_taker(order),
+                    is_taker=(self._fill_was_taker(order) if crossed is None
+                              else bool(crossed)),
                 )
             except Exception:  # noqa: BLE001  # policy: degrade-ok(trade-recording is best-effort; the recorder logs its own failures — a fill must never be lost to a reporting-bridge error)
                 pass

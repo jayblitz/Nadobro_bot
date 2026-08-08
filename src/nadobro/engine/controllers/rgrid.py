@@ -87,6 +87,9 @@ _FILL_HISTORY = 200
 # deliberately conservative floor: R-Grid rests maker quotes, so its real cost is
 # lower and this only ever makes the arm harder to reach, never easier.
 _MIN_ARM_PCT = Decimal("0.00086")
+# How far through the touch a crossing exit prices. Wide enough to cross a normal
+# book, bounded so a gapped book cannot fill it at an arbitrary price.
+_EXIT_CROSS_BP = Decimal("30")
 # After this many consecutive refused exits, stop pretending a retry-only posture
 # is safe and say so loudly (the rail still owns the hard stop).
 _MAX_CONSECUTIVE_EXIT_FAILURES = 5
@@ -445,9 +448,13 @@ class RGridController(MarketMakingController):
         await self._cancel_leg(TradeType.BUY)
         await self._cancel_leg(TradeType.SELL)
         side = TradeType.SELL if net > 0 else TradeType.BUY
+        # Priced THROUGH the touch so it crosses, but bounded — limit orders only.
+        _slip = _EXIT_CROSS_BP / Decimal(10000)
+        _px = (mid * (Decimal(1) - _slip) if side is TradeType.SELL
+               else mid * (Decimal(1) + _slip))
         cfg = build_trail_stop(
             self.trading_pair, side, abs(net),
-            leverage=int(self.cfg("leverage", 1) or 1),
+            leverage=int(self.cfg("leverage", 1) or 1), price=_px,
         )
         ex = RGridMakerExecutor(
             cfg, user_id=self.user_id, controller_id=self.id,

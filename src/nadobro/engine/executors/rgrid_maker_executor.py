@@ -61,7 +61,7 @@ class RGridMakerExecutor(OrderExecutor):
         # it is allowed to cross. Everything else must be post-only, and an edit
         # that tries to sneak a MARKET entry through raises here.
         if self.leg == LEG_TRAIL_STOP:
-            if config.execution_strategy is not ExecutionStrategy.MARKET:
+            if config.execution_strategy is not ExecutionStrategy.LIMIT:
                 raise ValueError(
                     "the trailing stop is the crossing order: execution_strategy "
                     f"must be MARKET (got {config.execution_strategy.value})"
@@ -128,16 +128,22 @@ def build_trail_stop(
     amount_base: object,
     *,
     leverage: int = 1,
+    price: object = None,
 ) -> OrderExecutorConfig:
-    """Config for the armed trailing stop: MARKET, reduce-only, crossing.
+    """Config for a crossing exit: a MARKETABLE LIMIT, reduce-only.
 
-    The single exemption from maker-only. A trailing stop has to act once price has
-    already moved against the position, which is precisely where a resting post-only
-    order cannot sit — so this one crosses. Reduce-only, so it can only shrink the
-    book, never open or flip it.
+    LIMIT ORDERS ONLY. An exit has to act once price has already moved against the
+    position, which is precisely where a resting post-only order cannot sit — so
+    this one crosses. It is still a LIMIT with a bounded price, never a naked
+    MARKET: a thin or gapped book can then refuse it, but it can never fill it at
+    an arbitrary price. Reduce-only, so it can only shrink the book, never open or
+    flip it. ``crosses_book`` keeps the reporting flag honest, since the order TYPE
+    no longer says taker.
     """
     return OrderExecutorConfig(
-        trading_pair, side, _dec(amount_base), ExecutionStrategy.MARKET,
+        trading_pair, side, _dec(amount_base), ExecutionStrategy.LIMIT,
+        price=_dec(price) if price is not None else None,
         leverage=int(leverage or 1),
         position_action=PositionAction.CLOSE,
+        crosses_book=True,
     )

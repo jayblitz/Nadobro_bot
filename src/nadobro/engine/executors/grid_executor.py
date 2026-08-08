@@ -36,11 +36,17 @@ from src.nadobro.engine.types import (
 )
 
 
-# TAKER RISK EXITS (2026-08-08, product ruling). Every risk exit in this executor
-# CROSSES: the stop-out flatten, the take-profit flatten, and D-Grid's profit-tier
-# scale-out via ``reduce_position``. Only entries and the ladder's paired per-level
-# close legs rest post-only — those have no deadline and earn the spread, while an
-# exit that may not fill is not an exit.
+# LIMIT ORDERS ONLY (2026-08-08, product ruling). This executor never sends a naked
+# MARKET order. Entries and the ladder's paired per-level close legs REST post-only.
+# Every risk exit — the stop-out flatten, the take-profit flatten, and D-Grid's
+# profit-tier scale-out — is a MARKETABLE LIMIT: a bounded limit priced through the
+# touch, so it crosses and fills like a taker but can never execute worse than its
+# limit. An exit that may not fill is not an exit; an exit with no price bound is
+# not one either.
+#
+# How far through the touch an exit prices. Wide enough to cross a normal book,
+# bounded so a thin or gapped book cannot fill it at an arbitrary price.
+_EXIT_CROSS_BP = Decimal("30")
 
 
 class GridLevelState(Enum):
@@ -414,6 +420,21 @@ class GridExecutor(Executor):
         # Place the re-priced opens now (subject to the usual suppress/bounds).
         await self._maybe_place_opens()
 
+    def _exit_cross_price(self, mid: Decimal) -> Optional[Decimal]:
+        """A limit price far enough THROUGH the touch to cross, and no further.
+
+        LIMIT ORDERS ONLY: an exit must act, so it is priced aggressively; but it is
+        still a limit, so a gapped or thin book cannot fill it at an arbitrary
+        price the way a naked MARKET order can. ``None`` when there is no usable
+        mid — the caller then has nothing safe to price against.
+        """
+        if mid is None or mid <= 0:
+            return None
+        slip = _EXIT_CROSS_BP / Decimal(10000)
+        if self.close_side is TradeType.SELL:
+            return mid * (Decimal(1) - slip)     # sell down through the bid
+        return mid * (Decimal(1) + slip)         # buy up through the ask
+
     def _unclosed_base(self) -> Decimal:
         held = sum(
             (lv.filled_base - lv._close_recorded - lv._close_booked_base
@@ -422,7 +443,7 @@ class GridExecutor(Executor):
         )
         return max(Decimal(0), held)
 
-    async def _ingest_book(self, order: NadoOrder) -> Decimal:
+    async def _ingest_book(self, order: NadoOrder, *, crossed: bool = False) -> Decimal:
         """Book the fill of an external reduce-only close (a profit tier).
 
         Mirrors :meth:`_ingest` — marginal price for the chunk, fee delta passed
@@ -444,6 +465,7 @@ class GridExecutor(Executor):
             Fill(order.id, self.trading_pair, self.close_side, delta_base, price,
                  delta_fee, time.time()),
             order,
+            crossed=crossed or None,
         )
         await self._advance_close_accounting(delta_base)
         return delta_base
@@ -482,9 +504,13 @@ class GridExecutor(Executor):
         reduce = min(amount, self._unclosed_base())
         if reduce <= 0:
             return Decimal(0)
-        # No min-notional guard: a MARKET order is not subject to the venue's
+        # No min-notional guard: a crossing order is not subject to the venue's
         # RESTING minimum, which is exactly why crossing is the right tool for an
         # exit that would otherwise be too small to place at all.
+        if mid is None:
+            mid = await self._guard(
+                lambda: self.adapter.mid_price(self.trading_pair), label="grid_book_mid",
+            )
         # NOT via _guard: it terminates the executor FAILED after its retries, and
         # _terminate cancels nothing — so a transient venue error on a DISCRETIONARY
         # profit tier used to kill the ladder and strand every resting order on the
@@ -492,8 +518,9 @@ class GridExecutor(Executor):
         # flatten is the path that may terminate.
         try:
             order = await self.adapter.place_order(
-                self.trading_pair, self.close_side, OrderType.MARKET,
-                reduce, None, self.config.leverage, True,
+                self.trading_pair, self.close_side, OrderType.LIMIT,
+                reduce, self._exit_cross_price(_dec(mid or 0)),
+                self.config.leverage, True,
             )
         except Exception as exc:  # noqa: BLE001 - booking is best-effort, retry next tick
             logger.warning("grid %s: profit-tier book failed (retry next tick): %s",
@@ -505,7 +532,7 @@ class GridExecutor(Executor):
         self._book_recorded_quote = Decimal(0)
         self._book_recorded_fee = Decimal(0)
         self.orders_placed += 1
-        booked = await self._ingest_book(order)
+        booked = await self._ingest_book(order, crossed=True)
         if booked > 0:
             self.orders_filled += 1
         return booked
@@ -794,10 +821,14 @@ class GridExecutor(Executor):
                     )
         net = self._net_base()
         if not self.config.keep_position and net > 0:
+            stop_mid = await self._guard(
+                lambda: self.adapter.mid_price(self.trading_pair), label="grid_stop_mid",
+            )
+            exit_px = self._exit_cross_price(_dec(stop_mid or 0))
             flat = await self._guard(
                 lambda: self.adapter.place_order(
-                    self.trading_pair, self.close_side, OrderType.MARKET, net, None,
-                    self.config.leverage, True,
+                    self.trading_pair, self.close_side, OrderType.LIMIT, net,
+                    exit_px, self.config.leverage, True,
                 ),
                 label="grid_flatten",
             )
@@ -813,6 +844,7 @@ class GridExecutor(Executor):
                         flat.filled_base, price, flat.fee_quote, time.time(),
                     ),
                     flat,
+                    crossed=True,          # a marketable limit IS a taker fill
                 )
                 # The flatten is an EXTERNAL close like a profit tier, so it goes
                 # through the same attribution and completion rule. This used to

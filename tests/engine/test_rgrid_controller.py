@@ -75,7 +75,7 @@ def _resting(adapter, side=None):
 def _crossings(adapter, side=None):
     """Orders that CROSS — every risk exit is one of these."""
     return [o for o in adapter.placed
-            if o.order_type is OrderType.MARKET
+            if o.order_type is OrderType.LIMIT
             and (side is None or o.side is side)]
 
 
@@ -87,15 +87,15 @@ def _seed_leg(c, leg, px, base=Decimal(1)):
 # 1. Maker-only, structurally
 # ==========================================================================
 @pytest.mark.parametrize("strategy", [
-    ExecutionStrategy.MARKET, ExecutionStrategy.LIMIT,
+    ExecutionStrategy.LIMIT, ExecutionStrategy.MARKET,
 ])
 def test_the_executor_refuses_anything_that_is_not_post_only(strategy):
     """Every MM strategy rests post-only limit orders. Enforced in the constructor
     so an edit cannot quietly turn a maker strategy into one paying 4.3bp a side."""
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     cfg = OrderExecutorConfig(
         PAIR, TradeType.BUY, Decimal(1), strategy,
-        price=(Decimal(100) if strategy is not ExecutionStrategy.MARKET else None),
+        price=(None if strategy is ExecutionStrategy.MARKET else Decimal(100)),
     )
     with pytest.raises(ValueError, match="maker-only"):
         RGridMakerExecutor(cfg, user_id=1, controller_id="RG", adapter=adapter)
@@ -105,7 +105,7 @@ def test_only_the_trailing_stop_may_cross():
     """Everything R-Grid rests is post-only. The armed trailing stop is the single
     exemption — it has to act where a post-only order cannot sit."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         orch, c = _controller(adapter, extra={
             "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
         })
@@ -119,7 +119,7 @@ def test_only_the_trailing_stop_may_cross():
             await orch.tick_controller(c.id)
         assert adapter.placed, "expected R-Grid to have quoted"
         crossing = [o for o in adapter.placed if o.order_type is not OrderType.LIMIT_MAKER]
-        assert all(o.order_type is OrderType.MARKET for o in crossing), (
+        assert all(o.order_type is OrderType.LIMIT for o in crossing), (
             f"a non-post-only, non-market order was placed: {crossing}"
         )
         # Every crossing order is a reduce-only stop, never an entry.
@@ -131,25 +131,26 @@ def test_only_the_trailing_stop_may_cross():
     asyncio.run(body())
 
 
-def test_the_executor_allows_market_only_for_the_trailing_stop():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+def test_the_executor_allows_a_crossing_limit_only_for_the_exit():
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     from src.nadobro.engine.executors.rgrid_maker_executor import build_trail_stop
 
     # Allowed: the stop.
     ok = RGridMakerExecutor(
-        build_trail_stop(PAIR, TradeType.SELL, Decimal(1)),
+        build_trail_stop(PAIR, TradeType.SELL, Decimal(1), price=Decimal("99.7")),
         user_id=1, controller_id="RG", adapter=adapter, leg=LEG_TRAIL_STOP,
     )
-    assert ok.config.execution_strategy is ExecutionStrategy.MARKET and ok.is_exit
-    # Refused: a MARKET order dressed as an entry.
-    market_entry = OrderExecutorConfig(PAIR, TradeType.BUY, Decimal(1), ExecutionStrategy.MARKET)
+    assert ok.config.execution_strategy is ExecutionStrategy.LIMIT and ok.is_exit
+    # Refused: a crossing (non-post-only) order dressed as an entry.
+    market_entry = OrderExecutorConfig(PAIR, TradeType.BUY, Decimal(1),
+                                       ExecutionStrategy.LIMIT, price=Decimal(100))
     with pytest.raises(ValueError, match="maker-only"):
         RGridMakerExecutor(market_entry, user_id=1, controller_id="RG",
                            adapter=adapter, leg=LEG_ENTRY)
     # Refused: a stop that is not reduce-only.
     not_reduce_only = OrderExecutorConfig(
-        PAIR, TradeType.SELL, Decimal(1), ExecutionStrategy.MARKET,
-        position_action=PositionAction.OPEN,
+        PAIR, TradeType.SELL, Decimal(1), ExecutionStrategy.LIMIT,
+        price=Decimal(100), position_action=PositionAction.OPEN,
     )
     with pytest.raises(ValueError, match="reduce-only"):
         RGridMakerExecutor(not_reduce_only, user_id=1, controller_id="RG",
@@ -157,7 +158,7 @@ def test_the_executor_allows_market_only_for_the_trailing_stop():
 
 
 def test_the_reducing_leg_is_reduce_only_and_the_adding_leg_is_not():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     entry = build_maker_quote(PAIR, TradeType.BUY, Decimal(1), Decimal(99))
     exit_ = build_maker_quote(PAIR, TradeType.SELL, Decimal(1), Decimal(101), reduce_only=True)
     e = RGridMakerExecutor(entry, user_id=1, controller_id="RG", adapter=adapter, leg=LEG_ENTRY)
@@ -170,7 +171,7 @@ def test_the_reducing_leg_is_reduce_only_and_the_adding_leg_is_not():
 # 2. The anchor
 # ==========================================================================
 def test_anchor_is_the_average_of_the_two_leg_exposure_prices():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter)
     _seed_leg(c, "buy", 100, Decimal(2))
     _seed_leg(c, "buy", 100, Decimal(1))
@@ -182,7 +183,7 @@ def test_anchor_is_the_average_of_the_two_leg_exposure_prices():
 
 
 def test_one_sided_book_anchors_on_the_leg_that_traded():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter)
     _seed_leg(c, "buy", 100)
     _seed_leg(c, "buy", 104)
@@ -191,7 +192,7 @@ def test_one_sided_book_anchors_on_the_leg_that_traded():
 
 
 def test_discretion_windows_each_leg_independently():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter, extra={"vwap_volume_fraction": Decimal("0.5")})
     for px in (100, 100, 110, 120):
         _seed_leg(c, "buy", px)
@@ -210,7 +211,7 @@ def test_both_legs_feed_the_exposure_window():
     must still feed the sell window — the anchor is what it is regardless of which
     order type produced the fill."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=True)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=True)
         orch, c = _controller(adapter)
         await orch.spawn_controller(c)
         # A live long of 2, so a PARTIAL reducing fill leaves the book non-flat and
@@ -220,7 +221,7 @@ def test_both_legs_feed_the_exposure_window():
         adapter.set_mid(Decimal("99"))           # through the trigger -> exit fires
         await orch.tick_controller(c.id)
         crossing = [o for o in adapter.placed
-                    if o.side is TradeType.SELL and o.order_type is OrderType.MARKET]
+                    if o.side is TradeType.SELL and o.order_type is OrderType.LIMIT]
         assert crossing, "the exposure-band exit should have crossed"
         # Ingest the crossing fill, then absorb directly rather than ticking the
         # controller: the same controller tick that absorbs it also sees a flat book
@@ -241,7 +242,7 @@ def test_both_legs_feed_the_exposure_window():
 
 
 def test_seed_from_session_history_scopes_the_anchor_to_the_run():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     seed = [
         {"price": 120, "size": 1, "side": "long"},
         {"price": 100, "size": 1, "side": "long"},
@@ -260,7 +261,7 @@ def test_seed_from_session_history_scopes_the_anchor_to_the_run():
 # ==========================================================================
 def test_inside_the_band_neither_leg_can_rest():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         orch, c = _controller(adapter)
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)          # anchor := 100
@@ -276,7 +277,7 @@ def test_above_the_band_only_the_buy_leg_rests():
     """Price has risen past anchor x (1+spread), so that bid is now BELOW market —
     a valid maker order, and the one that buys into strength on a pullback."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         orch, c = _controller(adapter)
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)          # anchor := 100
@@ -291,7 +292,7 @@ def test_above_the_band_only_the_buy_leg_rests():
 
 def test_below_the_band_only_the_sell_leg_rests():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         orch, c = _controller(adapter)
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)          # anchor := 100
@@ -307,7 +308,7 @@ def test_below_the_band_only_the_sell_leg_rests():
 def test_a_post_only_price_is_never_sent_on_the_crossing_side():
     """The venue rejects a crossing post-only order (error_code 2008), and R-Grid
     must not cross to force a fill — so the leg is simply not sent."""
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter)
     mid = Decimal(100)
     assert c._is_postable(TradeType.BUY, Decimal("99.5"), mid) is True
@@ -318,7 +319,7 @@ def test_a_post_only_price_is_never_sent_on_the_crossing_side():
 
 def test_no_fills_waits_at_the_seeded_mid():
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         orch, c = _controller(adapter)
         await orch.spawn_controller(c)
         await orch.tick_controller(c.id)          # mid == anchor: inside the band
@@ -341,7 +342,7 @@ def test_the_exposure_band_exit_CROSSES_the_whole_position():
     the `_resting` helper did not filter by order type — the MARKET exit satisfied
     it. Both are fixed."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=True)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=True)
         orch, c = _controller(adapter, extra={"order_amount_quote": Decimal(10)})
         await orch.spawn_controller(c)
         # Net long 3 units, anchor 100 -> sell trigger at 99.9.
@@ -364,7 +365,7 @@ def test_the_adding_leg_still_rests_post_only_while_a_position_is_open():
     """The other half of the ruling: entries never cross. With a long open, the BUY
     that adds to it is still a post-only maker."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=True)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=True)
         orch, c = _controller(adapter, extra={"order_amount_quote": Decimal(10)})
         await orch.spawn_controller(c)
         c.inventory.apply_fill(1, PAIR, c.id, TradeType.BUY, Decimal(3), Decimal(300), Decimal(0))
@@ -381,12 +382,12 @@ def test_the_adding_leg_still_rests_post_only_while_a_position_is_open():
 def test_a_quote_is_rounded_down_to_the_lot_and_refused_below_the_minimum():
     """NadoClient GROWS a sub-minimum non-reducing order, which would rest more
     than the risk engine and the step cap were sized against."""
-    adapter = MockNadoAdapter(mid=Decimal(100), lot=Decimal("0.5"), min_notional=Decimal(1))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), lot=Decimal("0.5"), min_notional=Decimal(1))
     _, c = _controller(adapter)
     assert c._quantize_quote(Decimal("1.2"), Decimal(100)) == Decimal("1.0")
     assert c._quantize_quote(Decimal("0.37"), Decimal(100)) is None
 
-    tiny = MockNadoAdapter(mid=Decimal(100), lot=Decimal("0.001"), min_notional=Decimal(50))
+    tiny = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), lot=Decimal("0.001"), min_notional=Decimal(50))
     _, c2 = _controller(tiny)
     assert c2._quantize_quote(Decimal("0.1"), Decimal(100)) is None      # $10 < $50
     assert c2._quantize_quote(Decimal("1.0"), Decimal(100)) == Decimal("1.0")
@@ -399,7 +400,7 @@ def test_the_armed_soft_reset_moves_the_exit_leg_up_with_the_trend():
     """"Adjusts the opposite leg to follow the trend and lock in profits" is
     literally a re-quote of that leg — no crossing involved."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         orch, c = _controller(adapter, extra={
             "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
         })
@@ -413,13 +414,13 @@ def test_the_armed_soft_reset_moves_the_exit_leg_up_with_the_trend():
         assert c._trail_peak == Decimal("108")
         # AT the peak the trail is not yet breached, so nothing crosses.
         assert c._trail_breached(Decimal("108"), Decimal(1)) is False
-        assert [o for o in adapter.placed if o.order_type is OrderType.MARKET] == []
+        assert [o for o in adapter.placed if o.order_type is OrderType.LIMIT] == []
 
         # Price comes back THROUGH the trailed level (108 x 0.999 = 107.892) — the
         # one place a post-only ask cannot sit. The stop crosses.
         adapter.set_mid(Decimal("107"))
         await orch.tick_controller(c.id)
-        stops = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        stops = [o for o in adapter.placed if o.order_type is OrderType.LIMIT]
         assert len(stops) == 1, "the trailing stop never crossed"
         assert stops[0].side is TradeType.SELL
         assert stops[0].amount_base == Decimal(1), "the stop closes the whole position"
@@ -431,7 +432,7 @@ def test_the_trail_only_crosses_once_and_cancels_the_resting_legs_first():
     """Leaving the maker exit up alongside the stop would sell the same position
     twice — the second order re-opening the other way once the first flattened us."""
     async def body():
-        adapter = MockNadoAdapter(mid=Decimal(100), auto_fill_market=False)
+        adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100), auto_fill_market=False)
         orch, c = _controller(adapter, extra={
             "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
         })
@@ -443,19 +444,19 @@ def test_the_trail_only_crosses_once_and_cancels_the_resting_legs_first():
         adapter.set_mid(Decimal("107"))
         await orch.tick_controller(c.id)          # crosses
         assert c._resting == {}, "a resting leg survived alongside the stop"
-        stops = [o for o in adapter.placed if o.order_type is OrderType.MARKET]
+        stops = [o for o in adapter.placed if o.order_type is OrderType.LIMIT]
         assert len(stops) == 1
         # Further ticks while it settles must not stack a second stop.
         for px in ("106", "105"):
             adapter.set_mid(Decimal(px))
             await orch.tick_controller(c.id)
-        assert len([o for o in adapter.placed if o.order_type is OrderType.MARKET]) == 1
+        assert len([o for o in adapter.placed if o.order_type is OrderType.LIMIT]) == 1
 
     asyncio.run(body())
 
 
 def test_the_trail_only_ratchets_forward():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter, extra={
         "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
     })
@@ -467,7 +468,7 @@ def test_the_trail_only_ratchets_forward():
 
 
 def test_the_trail_never_arms_underwater():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter, extra={
         "reset_threshold_pct": Decimal("0.01"), "trail_enabled": True,
     })
@@ -478,7 +479,7 @@ def test_the_trail_never_arms_underwater():
 
 
 def test_an_opposing_overlay_arms_early_but_still_needs_a_profit():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter, extra={
         "reset_threshold_pct": Decimal("0.05"),       # far away: no normal arm
         "trail_enabled": True,
@@ -492,7 +493,7 @@ def test_an_opposing_overlay_arms_early_but_still_needs_a_profit():
 
 
 def test_a_supportive_overlay_does_not_cut_the_run_short():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter, extra={
         "reset_threshold_pct": Decimal("0.05"), "trail_enabled": True,
         "signal_regime": "trend_up", "signal_confidence": 0.9,
@@ -503,7 +504,7 @@ def test_a_supportive_overlay_does_not_cut_the_run_short():
 
 
 def test_going_flat_clears_the_window_and_disarms():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter)
     _seed_leg(c, "buy", 100)
     c._trail_armed, c._trail_peak = True, Decimal(105)
@@ -519,7 +520,7 @@ def test_going_flat_clears_the_window_and_disarms():
 def test_a_barely_moved_target_keeps_its_queue_position():
     """Cancel/replace churn destroys queue position, which is the entire edge of a
     maker quote."""
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter, extra={"price_distance_tolerance": Decimal("0.001")})
     assert c._price_is_close(Decimal("100.00"), Decimal("100.05")) is True
     assert c._price_is_close(Decimal("100.00"), Decimal("101.00")) is False
@@ -548,7 +549,7 @@ def test_rgrid_is_always_its_own_controller_and_never_the_phase_switcher():
             assert dead not in cfg, dead
         built = build_controller(
             "rgrid", user_id=1, configs=cfg,
-            orchestrator=ExecutorOrchestrator(), adapter=MockNadoAdapter(mid=Decimal(100)),
+            orchestrator=ExecutorOrchestrator(), adapter=MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100)),
             inventory=InventoryRepository(),
         )
         assert isinstance(built, RGridController), extra
@@ -601,7 +602,7 @@ def test_rgrid_is_never_choked_or_gated_by_the_overlay():
 
 
 def test_metrics_expose_the_anchor_and_both_leg_prices():
-    adapter = MockNadoAdapter(mid=Decimal(100))
+    adapter = MockNadoAdapter(fill_marketable_limits=True, mid=Decimal(100))
     _, c = _controller(adapter, extra={"reset_threshold_pct": Decimal("0.01")})
     _seed_leg(c, "buy", 100)
     c._last_anchor = c.exposure_anchor()
