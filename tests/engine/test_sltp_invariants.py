@@ -233,11 +233,16 @@ def test_rgrid_is_on_the_session_rail_branch_in_the_cycle():
     """Structural guard: the rail only runs for the strategies named in
     bot_runtime._run_cycle. If rgrid ever drops out of that tuple its stop stops
     existing — silently, because nothing else enforces it for this controller."""
-    import inspect
+    from pathlib import Path
 
-    from src.nadobro.strategy import bot_runtime
-
-    source = inspect.getsource(bot_runtime._run_cycle)
+    # Read the SOURCE rather than importing bot_runtime. This is a structural
+    # guard, so it must not need the module to be importable: the Strategy
+    # Self-Review CI job installs only pytest, and importing bot_runtime pulls in
+    # psycopg2 (models/database.py), which fails there and nowhere else.
+    text = Path("src/nadobro/strategy/bot_runtime.py").read_text()
+    start = text.index("async def _run_cycle")
+    end = text.find("\nasync def ", start + 1)
+    source = text[start:end if end != -1 else len(text)]
     assert 'if strategy in ("grid", "rgrid", "dgrid", "mid"):' in source, (
         "rgrid must stay on the session SL/TP rail branch"
     )
